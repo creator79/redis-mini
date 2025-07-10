@@ -66,6 +66,11 @@ function serializeError(message) {
   return `-${message}\r\n`;
 }
 
+function serializeNullBulkString() {
+  return `$-1\r\n`;
+}
+
+
 /**
  * Command handler (dispatches based on parsed command)
  *
@@ -123,25 +128,25 @@ function handleCommand(args) {
     return serializeSimpleString("OK");
   }
 
-  case "GET": {
-    if (args.length < 2) {
-      return serializeError("ERR wrong number of arguments for 'GET'");
-    }
-
-    const record = store.get(args[1]);
-
-    if (!record) {
-      return serializeBulkString("");
-    }
-
-    // Check expiry
-    if (record.expiresAt && Date.now() > record.expiresAt) {
-      store.delete(args[1]);
-      return serializeBulkString("");
-    }
-
-    return serializeBulkString(record.value);
+ case "GET": {
+  if (args.length < 2) {
+    return serializeError("ERR wrong number of arguments for 'GET'");
   }
+
+  const record = store.get(args[1]);
+
+  if (!record) {
+    return serializeNullBulkString();
+  }
+
+  if (record.expiresAt && Date.now() > record.expiresAt) {
+    store.delete(args[1]);
+    return serializeNullBulkString();
+  }
+
+  return serializeBulkString(record.value);
+}
+
 
 
     default:
