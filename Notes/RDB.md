@@ -1,3 +1,4 @@
+```
 ┌─────────────────┐
 │     HEADER      │  ← "REDIS" + version
 ├─────────────────┤
@@ -9,7 +10,7 @@
 ├─────────────────┤
 │    CHECKSUM     │  ← File integrity check
 └─────────────────┘
-
+```
 
 # 🎒 Redis RDB File Format -
 
