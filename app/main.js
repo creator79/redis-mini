@@ -58,18 +58,31 @@ function loadData() {
   }
 
   console.log(`Loading from ${fullPath}`);
-  const buffer = fs.readFileSync(fullPath);
-  const hexString = buffer.toString("hex");
-
+  
   try {
+    const buffer = fs.readFileSync(fullPath);
+    const hexString = buffer.toString("hex");
+
     const pairs = parseHexRDB(hexString);
+    
     pairs.forEach(({ key, value, expiresAt }) => {
+      // Check if key has already expired
+      if (expiresAt && Date.now() > expiresAt) {
+        console.log(`Skipping expired key: ${key} (expired at ${new Date(expiresAt).toISOString()})`);
+        return;
+      }
+      
       store.set(key, { value, expiresAt });
       const expiryInfo = expiresAt ? ` (expires at ${new Date(expiresAt).toISOString()})` : '';
       console.log(`Loaded key: ${key} -> ${value}${expiryInfo}`);
     });
+    
+    console.log(`Successfully loaded ${pairs.length} key-value pairs`);
+    
   } catch (err) {
-    console.error("Error parsing RDB:", err.message);
+    console.error("Error loading RDB file:", err.message);
+    console.error("Stack trace:", err.stack);
+    // Continue with empty store instead of crashing
   }
 }
 
@@ -129,7 +142,16 @@ function handleCommand(args) {
 
     case "KEYS":
       if (args.length === 2 && args[1] === "*") {
-        return serialize.array([...store.keys()]);
+        // Filter out expired keys
+        const validKeys = [];
+        for (const [key, record] of store.entries()) {
+          if (!record.expiresAt || Date.now() <= record.expiresAt) {
+            validKeys.push(key);
+          } else {
+            store.delete(key); // Clean up expired keys
+          }
+        }
+        return serialize.array(validKeys);
       }
       return serialize.error("ERR only KEYS * supported");
 
