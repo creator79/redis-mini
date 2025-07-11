@@ -161,6 +161,6 @@ const server = net.createServer((conn) => {
   });
 });
 
-server.listen(6380, "127.0.0.1", () => {
-  console.log(`Server listening on 127.0.0.1:6380`);
+server.listen(6379, "127.0.0.1", () => {
+  console.log(`Server listening on 127.0.0.1:6379`);
 });
