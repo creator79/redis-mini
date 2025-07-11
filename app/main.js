@@ -1,4 +1,6 @@
 const net = require("net");
+const fs = require("fs");
+
 
 // In-memory key-value store for future SET/GET support
 const store = new Map();
@@ -59,6 +61,110 @@ for (let i = 0; i < args.length; i++) {
     i++;
   }
 }
+//Helper to read "size-encoded" values
+
+function readSize(buffer, offset) {
+  const first = buffer[offset];
+  const type = first >> 6;
+
+  if (type === 0b00) {
+    // 6 bits
+    return { size: first & 0x3F, nextOffset: offset + 1 };
+  } else if (type === 0b01) {
+    // 14 bits
+    const size = ((first & 0x3F) << 8) | buffer[offset + 1];
+    return { size, nextOffset: offset + 2 };
+  } else if (type === 0b10) {
+    // 32 bits
+    const size = buffer.readUInt32BE(offset + 1);
+    return { size, nextOffset: offset + 5 };
+  } else {
+    throw new Error("Unsupported size encoding type");
+  }
+}
+
+
+function readString(buffer, offset) {
+  const { size, nextOffset } = readSize(buffer, offset);
+  const str = buffer.slice(nextOffset, nextOffset + size).toString();
+  return { str, nextOffset: nextOffset + size };
+}
+
+
+function loadRDBFile() {
+  const path = config.dir + "/" + config.dbfilename;
+
+  if (!fs.existsSync(path)) {
+    console.log("No RDB file found, starting with empty store");
+    return;
+  }
+
+  console.log("Loading RDB file from", path);
+  const buffer = fs.readFileSync(path);
+
+  let offset = 0;
+
+  // Check header: REDIS
+  if (buffer.slice(0, 5).toString() !== "REDIS") {
+    console.error("Invalid RDB header");
+    return;
+  }
+
+  offset = 9; // skip 'REDIS' + 4 version chars
+
+  while (offset < buffer.length) {
+    const marker = buffer[offset];
+
+    if (marker === 0xFA) {
+      // metadata
+      offset++;
+      const metaName = readString(buffer, offset);
+      offset = metaName.nextOffset;
+      const metaValue = readString(buffer, offset);
+      offset = metaValue.nextOffset;
+    } else if (marker === 0xFE) {
+      // database selector
+      offset++;
+      const dbIndex = readSize(buffer, offset);
+      offset = dbIndex.nextOffset;
+    } else if (marker === 0xFB) {
+      // hash table sizes
+      offset++;
+      const keysInfo = readSize(buffer, offset);
+      offset = keysInfo.nextOffset;
+      const expiresInfo = readSize(buffer, offset);
+      offset = expiresInfo.nextOffset;
+    } else if (marker === 0xFC || marker === 0xFD) {
+      // Expire timestamps
+      if (marker === 0xFC) {
+        offset += 1 + 8;
+      } else {
+        offset += 1 + 4;
+      }
+    } else if (marker === 0x00) {
+      // Value type = string
+      offset++;
+      const key = readString(buffer, offset);
+      offset = key.nextOffset;
+      const value = readString(buffer, offset);
+      offset = value.nextOffset;
+
+      console.log(`Loaded key from RDB: ${key.str} -> ${value.str}`);
+
+      store.set(key.str, { value: value.str, expiresAt: null });
+    } else if (marker === 0xFF) {
+      // End of file
+      break;
+    } else {
+      console.error("Unknown marker:", marker);
+      break;
+    }
+  }
+}
+
+loadRDBFile();
+
+
 
 
 /**
@@ -183,6 +289,20 @@ case "CONFIG": {
   }
 
   return `*2\r\n${serializeBulkString(param)}${serializeBulkString(value)}`;
+}
+
+case "KEYS": {
+  if (args.length < 2 || args[1] !== "*") {
+    return serializeError("ERR only KEYS * is supported");
+  }
+
+  const keys = Array.from(store.keys());
+
+  let resp = `*${keys.length}\r\n`;
+  for (const k of keys) {
+    resp += serializeBulkString(k);
+  }
+  return resp;
 }
 
     default:
