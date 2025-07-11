@@ -11,6 +11,7 @@ const store = new Map();
  *   *2\r\n$4\r\nECHO\r\n$3\r\nhey\r\n
  *   -> ['ECHO', 'hey']
  */
+
 function parseRESP(buffer) {
   const str = buffer.toString();
   const lines = str.split("\r\n");
@@ -41,6 +42,24 @@ function parseRESP(buffer) {
 
   return result;
 }
+
+// Parse CLI arguments
+const args = process.argv.slice(2);
+let config = {
+  dir: '',
+  dbfilename: ''
+};
+
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === '--dir' && args[i + 1]) {
+    config.dir = args[i + 1];
+    i++;
+  } else if (args[i] === '--dbfilename' && args[i + 1]) {
+    config.dbfilename = args[i + 1];
+    i++;
+  }
+}
+
 
 /**
  * Serialize a simple string in RESP
@@ -147,7 +166,24 @@ function handleCommand(args) {
   return serializeBulkString(record.value);
 }
 
+case "CONFIG": {
+  if (args.length !== 3 || args[1].toUpperCase() !== "GET") {
+    return serializeError("ERR wrong number of arguments for 'CONFIG GET'");
+  }
 
+  const param = args[2];
+  let value = null;
+
+  if (param === "dir") {
+    value = config.dir;
+  } else if (param === "dbfilename") {
+    value = config.dbfilename;
+  } else {
+    value = ""; // Unknown parameters can return empty string (Redis behavior)
+  }
+
+  return `*2\r\n${serializeBulkString(param)}${serializeBulkString(value)}`;
+}
 
     default:
       return serializeError(`ERR unknown command '${command}'`);
@@ -178,6 +214,6 @@ const server = net.createServer((connection) => {
   });
 });
 
-server.listen(6379, "127.0.0.1", () => {
+server.listen(6380, "127.0.0.1", () => {
   console.log("Server listening on port 6379");
 });
