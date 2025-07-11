@@ -1,12 +1,12 @@
 // utils.js
-
-const HEADER = '5245444953'; // "REDIS"
+const HEADER = '5245444953';  // "REDIS"
 const HASH_TABLE_START = 'fb';
 const EOF = 'ff';
+const MILLISECONDS_EXPIRY = 'fc';
+const SECONDS_EXPIRY = 'fd';
 
 /**
- * Convert a hex string to an ASCII string.
- * Example: "68656c6c6f" -> "hello"
+ * Convert hex string to ASCII.
  */
 function hexToASCII(hex) {
   let ascii = '';
@@ -17,9 +17,15 @@ function hexToASCII(hex) {
 }
 
 /**
- * Parse a Redis RDB file *as hex* and extract key-value pairs.
- * Supports only simplified single-hash-table format.
- * Returns: array of { key, value }
+ * Parse an unsigned big-endian hex string to integer.
+ */
+function hexToInt(hex) {
+  return parseInt(hex, 16);
+}
+
+/**
+ * Parse the RDB hex data to extract key-value pairs with optional expiry.
+ * Returns array of { key, value, expiresAt }
  */
 function parseHexRDB(hexString) {
   if (!hexString.startsWith(HEADER)) {
@@ -32,48 +38,47 @@ function parseHexRDB(hexString) {
     return [];
   }
 
-  let stringData = hexString.slice(fbIndex + 2 + 4);
+  let remainder = hexString.slice(fbIndex + 2 + 4).split(EOF)[0];
+
   const result = [];
-  let pendingExpiry = null;
+  let expiresAt = null;
 
-  while (stringData.length >= 2) {
-    const opcode = stringData.slice(0, 2);
-    if (opcode === EOF || opcode === '') break;
+  while (remainder.length >= 2) {
+    const marker = remainder.slice(0, 2).toLowerCase();
 
-    if (opcode === 'fc') {
-      // Read 8-byte expiry in milliseconds
-      const expiryHex = stringData.slice(2, 18);
-      pendingExpiry = parseInt(expiryHex, 16);
-      stringData = stringData.slice(18);
-      continue;
-    }
+    if (marker === MILLISECONDS_EXPIRY) {
+      // 8-byte expiry (ms since epoch)
+      const expiryHex = remainder.slice(2, 18);
+      expiresAt = parseInt(expiryHex, 16);
+      remainder = remainder.slice(18);
+    } else if (marker === SECONDS_EXPIRY) {
+      // 4-byte expiry (s since epoch)
+      const expiryHex = remainder.slice(2, 10);
+      const seconds = parseInt(expiryHex, 16);
+      expiresAt = seconds * 1000;
+      remainder = remainder.slice(10);
+    } else if (marker === '00') {
+      remainder = remainder.slice(2);
 
-    if (opcode === '00') {
-      stringData = stringData.slice(2);
-
-      // Key
-      const keyLen = parseInt(stringData.slice(0, 2), 16);
-      const keyHex = stringData.slice(2, 2 + keyLen * 2);
+      // --- KEY ---
+      if (remainder.length < 4) break;
+      const keyLen = hexToInt(remainder.slice(2, 4));
+      const keyHex = remainder.slice(4, 4 + keyLen * 2);
       const key = hexToASCII(keyHex);
-      stringData = stringData.slice(2 + keyLen * 2);
+      remainder = remainder.slice(4 + keyLen * 2);
 
-      // Value
-      if (stringData.length < 2) break;
-      const valueLen = parseInt(stringData.slice(0, 2), 16);
-      const valueHex = stringData.slice(2, 2 + valueLen * 2);
-      const value = hexToASCII(valueHex);
-      stringData = stringData.slice(2 + valueLen * 2);
+      // --- VALUE ---
+      if (remainder.length < 4) break;
+      const valLen = hexToInt(remainder.slice(2, 4));
+      const valHex = remainder.slice(4, 4 + valLen * 2);
+      const value = hexToASCII(valHex);
+      remainder = remainder.slice(4 + valLen * 2);
 
-      result.push({
-        key,
-        value,
-        expiresAt: pendingExpiry
-      });
-
-      // Reset pending expiry
-      pendingExpiry = null;
+      result.push({ key, value, expiresAt });
+      expiresAt = null;
     } else {
-      console.error(`Unknown opcode in entry: ${opcode}`);
+      // Unknown marker (likely metadata or unhandled type), just stop
+      console.warn(`Unknown marker: ${marker}`);
       break;
     }
   }
@@ -81,11 +86,12 @@ function parseHexRDB(hexString) {
   return result;
 }
 
-
 module.exports = {
   HEADER,
   HASH_TABLE_START,
   EOF,
+  MILLISECONDS_EXPIRY,
+  SECONDS_EXPIRY,
   hexToASCII,
-  parseHexRDB,
+  parseHexRDB
 };
