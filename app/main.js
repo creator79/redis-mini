@@ -1,41 +1,33 @@
-// server.js
 const net = require("net");
 const fs = require("fs");
 const path = require("path");
+const { parseHexRDB } = require("./utils");
 
 //
 // --- CONFIG PARSING ---
-//
 const args = process.argv.slice(2);
 const config = { dir: ".", dbfilename: "dump.rdb" };
 
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--dir" && args[i + 1]) {
-    config.dir = args[++i];
-  } else if (args[i] === "--dbfilename" && args[i + 1]) {
-    config.dbfilename = args[++i];
-  }
+  if (args[i] === "--dir" && args[i + 1]) config.dir = args[++i];
+  else if (args[i] === "--dbfilename" && args[i + 1]) config.dbfilename = args[++i];
 }
 
 //
 // --- IN-MEMORY STORE ---
-//
-const store = new Map(); // key -> { value: string, expiresAt: timestamp|null }
+const store = new Map(); // key -> { value, expiresAt }
 
 //
 // --- RESP ENCODING HELPERS ---
-//
 const serialize = {
   simple: (msg) => `+${msg}\r\n`,
   error: (msg) => `-${msg}\r\n`,
   bulk: (msg) => (msg == null ? `$-1\r\n` : `$${msg.length}\r\n${msg}\r\n`),
-  array: (items) =>
-    `*${items.length}\r\n` + items.map(serialize.bulk).join(""),
+  array: (items) => `*${items.length}\r\n` + items.map(serialize.bulk).join(""),
 };
 
 //
-// --- RESP PARSING ---
-//
+// --- RESP PARSER ---
 function parseRESP(data) {
   const lines = data.toString().split("\r\n");
   if (!lines[0].startsWith("*")) throw new Error("Invalid RESP array");
@@ -46,18 +38,15 @@ function parseRESP(data) {
 
   while (result.length < count && i < lines.length) {
     if (!lines[i].startsWith("$")) throw new Error("Expected bulk string");
-    const len = parseInt(lines[i].slice(1), 10);
     result.push(lines[i + 1]);
     i += 2;
   }
 
-  if (result.length !== count) throw new Error("Incomplete RESP array");
   return result;
 }
 
 //
-// --- LOAD DATA FROM FILE ---
-//
+// --- LOAD FROM BINARY FILE ---
 function loadData() {
   const fullPath = path.join(config.dir, config.dbfilename);
 
@@ -66,19 +55,23 @@ function loadData() {
     return;
   }
 
-  console.log(`Loading from ${fullPath} (note: format is simplified)`);
-  const lines = fs.readFileSync(fullPath, "utf8").split("\n");
-  lines.forEach((line) => {
-    const [key, value] = line.trim().split("\t");
-    if (key && value) {
+  console.log(`Loading from ${fullPath}`);
+  const buffer = fs.readFileSync(fullPath);
+  const hexString = buffer.toString("hex");
+
+  try {
+    const pairs = parseHexRDB(hexString);
+    pairs.forEach(({ key, value }) => {
       store.set(key, { value, expiresAt: null });
-    }
-  });
+      console.log(`Loaded key: ${key} -> ${value}`);
+    });
+  } catch (err) {
+    console.error("Error parsing RDB:", err.message);
+  }
 }
 
 //
 // --- COMMAND HANDLER ---
-//
 function handleCommand(args) {
   if (args.length === 0) return serialize.error("ERR empty command");
 
@@ -94,8 +87,7 @@ function handleCommand(args) {
 
     case "SET": {
       if (args.length < 3) return serialize.error("ERR wrong number of arguments for SET");
-      const key = args[1];
-      const value = args[2];
+      const key = args[1], value = args[2];
       let expiresAt = null;
 
       for (let i = 3; i < args.length - 1; i++) {
@@ -146,7 +138,6 @@ function handleCommand(args) {
 
 //
 // --- SERVER ---
-//
 loadData();
 
 const server = net.createServer((conn) => {
