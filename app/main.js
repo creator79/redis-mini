@@ -63,16 +63,16 @@ function loadData() {
 
   try {
     const pairs = parseHexRDB(hexString);
-    pairs.forEach(({ key, value }) => {
-      store.set(key, { value, expiresAt: null });
-      console.log(`Loaded key: ${key} -> ${value}`);
+    pairs.forEach(({ key, value, expiresAt }) => {
+      store.set(key, { value, expiresAt });
+      const expiryInfo = expiresAt ? ` (expires at ${new Date(expiresAt).toISOString()})` : '';
+      console.log(`Loaded key: ${key} -> ${value}${expiryInfo}`);
     });
   } catch (err) {
     console.error("Error parsing RDB:", err.message);
   }
 }
 
-//
 // --- COMMAND HANDLER ---
 function handleCommand(args) {
   if (args.length === 0) return serialize.error("ERR empty command");
