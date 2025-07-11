@@ -1,4 +1,4 @@
-[![progress-banner](https://backend.codecrafters.io/progress/redis/be2458d2-b7ff-460a-a1f9-533375a55eb1)]
+![progress-banner](https://backend.codecrafters.io/progress/redis/be2458d2-b7ff-460a-a1f9-533375a55eb1)
 
 ## Next Steps 📚
 
