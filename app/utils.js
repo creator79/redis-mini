@@ -26,48 +26,43 @@ function parseHexRDB(hexString) {
     throw new Error("Invalid RDB header");
   }
 
-  // Locate FB marker (start of hash table)
   const fbIndex = hexString.indexOf(HASH_TABLE_START);
   if (fbIndex === -1) {
     console.log("No FB marker found. Empty DB.");
     return [];
   }
 
-  // Skip FB marker and 4 bytes of header/size metadata after it
+  // Go to after 'fb' and its payload header (4 bytes for RESIZEDB lengths)
   let stringData = hexString.slice(fbIndex + 2 + 4);
-
-  // Trim at FF marker (EOF)
-  const eofIndex = stringData.indexOf(EOF);
-  if (eofIndex !== -1) {
-    stringData = stringData.slice(0, eofIndex);
-  }
 
   const result = [];
 
-  while (stringData.length >= 4) {
-    // Key length
-    const keyLen = parseInt(stringData.slice(2, 4), 16);
-    if (isNaN(keyLen) || keyLen <= 0) break;
+  while (stringData.length >= 2) {
+    // First byte is opcode 00
+    const opcode = stringData.slice(0, 2);
+    if (opcode === EOF || opcode === '') break;
+    if (opcode !== '00') {
+      console.error(`Unknown opcode in entry: ${opcode}`);
+      break;
+    }
 
-    // Key
-    const keyHex = stringData.slice(4, 4 + keyLen * 2);
+    stringData = stringData.slice(2);  // Move past opcode
+
+    // Read key length
+    const keyLen = parseInt(stringData.slice(0, 2), 16);
+    const keyHex = stringData.slice(2, 2 + keyLen * 2);
     const key = hexToASCII(keyHex);
+    stringData = stringData.slice(2 + keyLen * 2);
 
-    stringData = stringData.slice(4 + keyLen * 2);
-    if (stringData.length < 4) break;
+    if (stringData.length < 2) break;
 
-    // Value length
-    const valLen = parseInt(stringData.slice(2, 4), 16);
-    if (isNaN(valLen) || valLen < 0) break;
-
-    // Value
-    const valHex = stringData.slice(4, 4 + valLen * 2);
-    const value = hexToASCII(valHex);
+    // Read value length
+    const valueLen = parseInt(stringData.slice(0, 2), 16);
+    const valueHex = stringData.slice(2, 2 + valueLen * 2);
+    const value = hexToASCII(valueHex);
+    stringData = stringData.slice(2 + valueLen * 2);
 
     result.push({ key, value });
-
-    // Slice off what we read
-    stringData = stringData.slice(4 + valLen * 2);
   }
 
   return result;
