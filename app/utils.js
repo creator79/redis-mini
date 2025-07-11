@@ -32,41 +32,55 @@ function parseHexRDB(hexString) {
     return [];
   }
 
-  // Go to after 'fb' and its payload header (4 bytes for RESIZEDB lengths)
   let stringData = hexString.slice(fbIndex + 2 + 4);
-
   const result = [];
+  let pendingExpiry = null;
 
   while (stringData.length >= 2) {
-    // First byte is opcode 00
     const opcode = stringData.slice(0, 2);
     if (opcode === EOF || opcode === '') break;
-    if (opcode !== '00') {
+
+    if (opcode === 'fc') {
+      // Read 8-byte expiry in milliseconds
+      const expiryHex = stringData.slice(2, 18);
+      pendingExpiry = parseInt(expiryHex, 16);
+      stringData = stringData.slice(18);
+      continue;
+    }
+
+    if (opcode === '00') {
+      stringData = stringData.slice(2);
+
+      // Key
+      const keyLen = parseInt(stringData.slice(0, 2), 16);
+      const keyHex = stringData.slice(2, 2 + keyLen * 2);
+      const key = hexToASCII(keyHex);
+      stringData = stringData.slice(2 + keyLen * 2);
+
+      // Value
+      if (stringData.length < 2) break;
+      const valueLen = parseInt(stringData.slice(0, 2), 16);
+      const valueHex = stringData.slice(2, 2 + valueLen * 2);
+      const value = hexToASCII(valueHex);
+      stringData = stringData.slice(2 + valueLen * 2);
+
+      result.push({
+        key,
+        value,
+        expiresAt: pendingExpiry
+      });
+
+      // Reset pending expiry
+      pendingExpiry = null;
+    } else {
       console.error(`Unknown opcode in entry: ${opcode}`);
       break;
     }
-
-    stringData = stringData.slice(2);  // Move past opcode
-
-    // Read key length
-    const keyLen = parseInt(stringData.slice(0, 2), 16);
-    const keyHex = stringData.slice(2, 2 + keyLen * 2);
-    const key = hexToASCII(keyHex);
-    stringData = stringData.slice(2 + keyLen * 2);
-
-    if (stringData.length < 2) break;
-
-    // Read value length
-    const valueLen = parseInt(stringData.slice(0, 2), 16);
-    const valueHex = stringData.slice(2, 2 + valueLen * 2);
-    const value = hexToASCII(valueHex);
-    stringData = stringData.slice(2 + valueLen * 2);
-
-    result.push({ key, value });
   }
 
   return result;
 }
+
 
 module.exports = {
   HEADER,
