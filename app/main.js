@@ -1,3 +1,5 @@
+// server.js
+
 const net = require("net");
 const fs = require("fs");
 const path = require("path");
@@ -46,7 +48,7 @@ function parseRESP(data) {
 }
 
 //
-// --- LOAD FROM BINARY FILE ---
+// --- LOAD DATA FROM HEX-ENCODED RDB FILE ---
 function loadData() {
   const fullPath = path.join(config.dir, config.dbfilename);
 
