@@ -16,7 +16,8 @@ const HANDSHAKE_STAGES = {
   PING: "PING",
   REPLCONF_LISTENING_PORT: "REPLCONF_LISTENING_PORT",
   REPLCONF_CAPA: "REPLCONF_CAPA",
-  PSYNC: "PSYNC"
+  PSYNC: "PSYNC",
+  COMPLETED: "COMPLETED"
 };
 
 const COMMANDS = {
@@ -126,6 +127,8 @@ class ReplicaHandshake {
     this.config = config;
     this.currentStage = HANDSHAKE_STAGES.PING;
     this.connection = null;
+    this.pendingResolve = null;
+    this.buffer = '';
   }
 
   async start() {
@@ -164,7 +167,8 @@ class ReplicaHandshake {
       });
 
       this.connection.on('data', (data) => {
-        this.handleMasterResponse(data);
+        this.buffer += data.toString();
+        this.handleMasterResponse();
       });
 
       this.connection.on('close', () => {
@@ -174,70 +178,128 @@ class ReplicaHandshake {
   }
 
   async executeHandshake() {
-    await this.sendPing();
-    await this.sendReplconfListeningPort();
-    await this.sendReplconfCapa();
-    await this.sendPsync();
+    console.log("Starting handshake sequence");
+    
+    // Step 1: PING
+    await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.PING);
+    
+    // Step 2: REPLCONF listening-port
+    await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.REPLCONF_LISTENING_PORT);
+    
+    // Step 3: REPLCONF capa
+    await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.REPLCONF_CAPA);
+    
+    // Step 4: PSYNC
+    await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.PSYNC);
+    
     console.log("Handshake completed successfully");
+    this.currentStage = HANDSHAKE_STAGES.COMPLETED;
+  }
+
+  sendCommandAndWaitForResponse(stage) {
+    return new Promise((resolve, reject) => {
+      this.currentStage = stage;
+      this.pendingResolve = resolve;
+      
+      switch (stage) {
+        case HANDSHAKE_STAGES.PING:
+          this.sendPing();
+          break;
+        case HANDSHAKE_STAGES.REPLCONF_LISTENING_PORT:
+          this.sendReplconfListeningPort();
+          break;
+        case HANDSHAKE_STAGES.REPLCONF_CAPA:
+          this.sendReplconfCapa();
+          break;
+        case HANDSHAKE_STAGES.PSYNC:
+          this.sendPsync();
+          break;
+        default:
+          reject(new Error(`Unknown stage: ${stage}`));
+      }
+      
+      // Set a timeout to avoid hanging
+      setTimeout(() => {
+        if (this.pendingResolve) {
+          this.pendingResolve = null;
+          reject(new Error(`Timeout waiting for response in stage: ${stage}`));
+        }
+      }, 5000);
+    });
   }
 
   sendPing() {
     console.log("Sending PING to master");
     const command = serialize.array([COMMANDS.PING]);
     this.connection.write(command);
-    this.currentStage = HANDSHAKE_STAGES.PING;
   }
 
   sendReplconfListeningPort() {
     console.log("Sending REPLCONF listening-port to master");
     const command = serialize.array([COMMANDS.REPLCONF, "listening-port", this.config.port.toString()]);
     this.connection.write(command);
-    this.currentStage = HANDSHAKE_STAGES.REPLCONF_LISTENING_PORT;
   }
 
   sendReplconfCapa() {
     console.log("Sending REPLCONF capa to master");
     const command = serialize.array([COMMANDS.REPLCONF, "capa", "psync2"]);
     this.connection.write(command);
-    this.currentStage = HANDSHAKE_STAGES.REPLCONF_CAPA;
   }
 
   sendPsync() {
     console.log("Sending PSYNC to master");
     const command = serialize.array([COMMANDS.PSYNC, "?", "-1"]);
     this.connection.write(command);
-    this.currentStage = HANDSHAKE_STAGES.PSYNC;
   }
 
-  handleMasterResponse(data) {
-    const response = data.toString();
-    console.log(`Received from master (${this.currentStage}):`, response.trim());
+  handleMasterResponse() {
+    // Process complete responses from the buffer
+    while (this.buffer.includes('\r\n')) {
+      let responseEnd = this.buffer.indexOf('\r\n');
+      let response = this.buffer.substring(0, responseEnd + 2);
+      this.buffer = this.buffer.substring(responseEnd + 2);
+      
+      console.log(`Received from master (${this.currentStage}):`, response.trim());
+      
+      switch (this.currentStage) {
+        case HANDSHAKE_STAGES.PING:
+          if (response.includes("PONG")) {
+            if (this.pendingResolve) {
+              this.pendingResolve();
+              this.pendingResolve = null;
+            }
+          }
+          break;
 
-    switch (this.currentStage) {
-      case HANDSHAKE_STAGES.PING:
-        if (response.includes("PONG")) {
-          this.sendReplconfListeningPort();
-        }
-        break;
+        case HANDSHAKE_STAGES.REPLCONF_LISTENING_PORT:
+          if (response.includes("OK")) {
+            if (this.pendingResolve) {
+              this.pendingResolve();
+              this.pendingResolve = null;
+            }
+          }
+          break;
 
-      case HANDSHAKE_STAGES.REPLCONF_LISTENING_PORT:
-        if (response.includes("OK")) {
-          this.sendReplconfCapa();
-        }
-        break;
+        case HANDSHAKE_STAGES.REPLCONF_CAPA:
+          if (response.includes("OK")) {
+            if (this.pendingResolve) {
+              this.pendingResolve();
+              this.pendingResolve = null;
+            }
+          }
+          break;
 
-      case HANDSHAKE_STAGES.REPLCONF_CAPA:
-        if (response.includes("OK")) {
-          this.sendPsync();
-        }
-        break;
-
-      case HANDSHAKE_STAGES.PSYNC:
-        if (response.includes("FULLRESYNC")) {
-          console.log("Full resync initiated");
-          // TODO: Handle RDB file reception in future stages
-        }
-        break;
+        case HANDSHAKE_STAGES.PSYNC:
+          if (response.includes("FULLRESYNC")) {
+            console.log("Full resync initiated");
+            if (this.pendingResolve) {
+              this.pendingResolve();
+              this.pendingResolve = null;
+            }
+            // TODO: Handle RDB file reception in future stages
+          }
+          break;
+      }
     }
   }
 }
@@ -432,14 +494,7 @@ async function main() {
   // Create command handler
   const commandHandler = new CommandHandler(config);
 
-  // Start replica handshake if this is a slave
-  if (config.role === ROLES.SLAVE) {
-    const handshake = new ReplicaHandshake(config);
-    // Start handshake in background
-    setImmediate(() => handshake.start());
-  }
-
-  // Start server
+  // Start server first
   const server = net.createServer((conn) => {
     console.log("Client connected");
 
@@ -461,6 +516,13 @@ async function main() {
 
   server.listen(config.port, "127.0.0.1", () => {
     console.log(`Server listening on 127.0.0.1:${config.port}`);
+    
+    // Start replica handshake after server is listening
+    if (config.role === ROLES.SLAVE) {
+      const handshake = new ReplicaHandshake(config);
+      // Start handshake in background
+      setImmediate(() => handshake.start());
+    }
   });
 }
 
