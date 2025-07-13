@@ -8,7 +8,7 @@ const { parseHexRDB } = require("./utils");
 //
 // --- CONFIG PARSING ---
 const args = process.argv.slice(2);
-const config = { dir: ".", dbfilename: "dump.rdb", port: 8000 };
+const config = { dir: ".", dbfilename: "dump.rdb", port: 6379 };
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--dir" && args[i + 1]) config.dir = args[++i];
