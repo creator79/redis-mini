@@ -8,14 +8,27 @@ const { parseHexRDB } = require("./utils");
 //
 // --- CONFIG PARSING ---
 const args = process.argv.slice(2);
-const config = { dir: ".", dbfilename: "dump.rdb", port: 6379 };
+const config = {
+  dir: ".",
+  dbfilename: "dump.rdb",
+  port: 6379,
+  role: "master",
+  masterHost: null,
+  masterPort: null,
+};
 
 for (let i = 0; i < args.length; i++) {
-  if (args[i] === "--dir" && args[i + 1]) config.dir = args[++i];
-  else if (args[i] === "--dbfilename" && args[i + 1])
+  if (args[i] === "--dir" && args[i + 1]) {
+    config.dir = args[++i];
+  } else if (args[i] === "--dbfilename" && args[i + 1]) {
     config.dbfilename = args[++i];
-  else if (args[i] === "--port" && args[i + 1])
+  } else if (args[i] === "--port" && args[i + 1]) {
     config.port = parseInt(args[++i], 10);
+  } else if (args[i] === "--replicaof" && args[i + 2]) {
+    config.role = "slave";
+    config.masterHost = args[++i];
+    config.masterPort = parseInt(args[++i], 10);
+  }
 }
 
 //
@@ -170,7 +183,7 @@ function handleCommand(args) {
 
     case "INFO":
       if (args.length === 2 && args[1].toLowerCase() === "replication") {
-        return serialize.bulk("role:master");
+        return serialize.bulk(`role:${config.role}`);
       }
       return serialize.error("ERR only INFO replication supported for now");
 
