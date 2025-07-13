@@ -274,9 +274,7 @@ class ReplicaHandshake {
     this.connection = null;
     this.pendingResolve = null;
     this.buffer = '';
-    this.rdbBytesExpected = 0;
-    this.rdbBytesReceived = 0;
-    this.receivingRdb = false;
+    this.replicationMode = false;
   }
 
   async start() {
@@ -290,6 +288,7 @@ class ReplicaHandshake {
     try {
       await this.connectToMaster();
       await this.executeHandshake();
+      this.replicationMode = true;
     } catch (error) {
       console.error("Handshake failed:", error.message);
       if (this.connection) {
@@ -316,7 +315,11 @@ class ReplicaHandshake {
 
       this.connection.on('data', (data) => {
         this.buffer += data.toString();
-        this.handleMasterResponse();
+        if (this.replicationMode) {
+          this.processReplicationBuffer();
+        } else {
+          this.handleMasterResponse();
+        }
       });
 
       this.connection.on('close', () => {
@@ -328,16 +331,9 @@ class ReplicaHandshake {
   async executeHandshake() {
     console.log("Starting handshake sequence");
     
-    // Step 1: PING
     await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.PING);
-    
-    // Step 2: REPLCONF listening-port
     await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.REPLCONF_LISTENING_PORT);
-    
-    // Step 3: REPLCONF capa
     await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.REPLCONF_CAPA);
-    
-    // Step 4: PSYNC
     await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.PSYNC);
     
     console.log("Handshake completed successfully");
@@ -348,25 +344,20 @@ class ReplicaHandshake {
     return new Promise((resolve, reject) => {
       this.currentStage = stage;
       this.pendingResolve = resolve;
-      
+
       switch (stage) {
         case HANDSHAKE_STAGES.PING:
-          this.sendPing();
-          break;
+          this.sendPing(); break;
         case HANDSHAKE_STAGES.REPLCONF_LISTENING_PORT:
-          this.sendReplconfListeningPort();
-          break;
+          this.sendReplconfListeningPort(); break;
         case HANDSHAKE_STAGES.REPLCONF_CAPA:
-          this.sendReplconfCapa();
-          break;
+          this.sendReplconfCapa(); break;
         case HANDSHAKE_STAGES.PSYNC:
-          this.sendPsync();
-          break;
+          this.sendPsync(); break;
         default:
           reject(new Error(`Unknown stage: ${stage}`));
       }
-      
-      // Set a timeout to avoid hanging
+
       setTimeout(() => {
         if (this.pendingResolve) {
           this.pendingResolve = null;
@@ -401,58 +392,18 @@ class ReplicaHandshake {
   }
 
   handleMasterResponse() {
-    if (this.currentStage === HANDSHAKE_STAGES.COMPLETED) {
-      // After handshake, handle propagated commands
-      this.handlePropagatedCommands();
-      return;
-    }
-
-    // Handle RDB file reception during PSYNC
-    if (this.receivingRdb) {
-      const bufferLength = Buffer.byteLength(this.buffer);
-      if (bufferLength >= this.rdbBytesExpected) {
-        // Skip the RDB file content
-        this.buffer = this.buffer.substring(this.rdbBytesExpected);
-        this.receivingRdb = false;
-        console.log("RDB file received and skipped");
-        
-        if (this.pendingResolve) {
-          this.pendingResolve();
-          this.pendingResolve = null;
-        }
-      }
-      return;
-    }
-
-    // Process handshake responses
     while (this.buffer.includes('\r\n')) {
       let responseEnd = this.buffer.indexOf('\r\n');
       let response = this.buffer.substring(0, responseEnd + 2);
       this.buffer = this.buffer.substring(responseEnd + 2);
       
       console.log(`Received from master (${this.currentStage}):`, response.trim());
-      
+
       switch (this.currentStage) {
         case HANDSHAKE_STAGES.PING:
-          if (response.includes("PONG")) {
-            if (this.pendingResolve) {
-              this.pendingResolve();
-              this.pendingResolve = null;
-            }
-          }
-          break;
-
         case HANDSHAKE_STAGES.REPLCONF_LISTENING_PORT:
-          if (response.includes("OK")) {
-            if (this.pendingResolve) {
-              this.pendingResolve();
-              this.pendingResolve = null;
-            }
-          }
-          break;
-
         case HANDSHAKE_STAGES.REPLCONF_CAPA:
-          if (response.includes("OK")) {
+          if (response.includes("OK") || response.includes("PONG")) {
             if (this.pendingResolve) {
               this.pendingResolve();
               this.pendingResolve = null;
@@ -463,82 +414,50 @@ class ReplicaHandshake {
         case HANDSHAKE_STAGES.PSYNC:
           if (response.includes("FULLRESYNC")) {
             console.log("Full resync initiated");
-            
-            // Check if next line is RDB file size
-            if (this.buffer.startsWith('$')) {
-              const sizeEnd = this.buffer.indexOf('\r\n');
-              if (sizeEnd !== -1) {
-                const sizeStr = this.buffer.substring(1, sizeEnd);
-                this.rdbBytesExpected = parseInt(sizeStr, 10);
-                this.buffer = this.buffer.substring(sizeEnd + 2);
-                this.receivingRdb = true;
-                console.log(`Expecting RDB file of ${this.rdbBytesExpected} bytes`);
-              }
-            } else {
-              // No RDB file expected, complete handshake
-              if (this.pendingResolve) {
-                this.pendingResolve();
-                this.pendingResolve = null;
-              }
+            if (this.pendingResolve) {
+              this.pendingResolve();
+              this.pendingResolve = null;
             }
+            // Next data will be RDB dump and commands
           }
           break;
       }
     }
   }
 
-  handlePropagatedCommands() {
-    // Process propagated commands from master
-    while (this.buffer.includes('\r\n')) {
-      try {
-        // Find the end of a complete RESP message
+  processReplicationBuffer() {
+    try {
+      while (true) {
         const lines = this.buffer.split('\r\n');
-        
-        if (lines[0].startsWith('*')) {
-          // Array command
-          const count = parseInt(lines[0].slice(1), 10);
-          const expectedLines = 1 + count * 2; // *N + count*($(length)+value)
-          
-          if (lines.length >= expectedLines) {
-            // We have a complete command
-            const commandLines = lines.slice(0, expectedLines);
-            const remainingBuffer = lines.slice(expectedLines).join('\r\n');
-            
-            // Parse the command
-            const args = [];
-            for (let i = 1; i < commandLines.length; i += 2) {
-              if (commandLines[i].startsWith('$')) {
-                args.push(commandLines[i + 1]);
-              }
-            }
-            
-            if (args.length > 0) {
-              console.log(`Processing propagated command:`, args);
-              
-              // Handle the command (but don't send response back to master)
-              this.commandHandler.handle(args, null);
-            }
-            
-            // Update buffer with remaining content
-            this.buffer = remainingBuffer;
-          } else {
-            // Don't have complete command yet
-            break;
-          }
-        } else {
-          // Unknown format, skip this line
-          const lineEnd = this.buffer.indexOf('\r\n');
-          this.buffer = this.buffer.substring(lineEnd + 2);
+        if (!lines[0].startsWith("*")) break;
+
+        const count = parseInt(lines[0].slice(1), 10);
+        const args = [];
+        let i = 1;
+
+        while (args.length < count && i < lines.length) {
+          if (!lines[i].startsWith("$")) break;
+          const len = parseInt(lines[i].slice(1), 10);
+          if (isNaN(len) || i + 1 >= lines.length) break;
+          args.push(lines[i + 1]);
+          i += 2;
         }
-      } catch (error) {
-        console.error("Error processing propagated command:", error.message);
-        // Skip this line and continue
-        const lineEnd = this.buffer.indexOf('\r\n');
-        this.buffer = this.buffer.substring(lineEnd + 2);
+
+        if (args.length !== count) break;
+
+        // Remove consumed lines
+        this.buffer = lines.slice(i).join('\r\n');
+
+        // Apply the command
+        console.log(`Replicating command from master:`, args);
+        this.commandHandler.handle(args, null);
       }
+    } catch (err) {
+      console.error("Error applying replication command:", err.message);
     }
   }
 }
+
 
 //
 // --- LOAD DATA FROM HEX-ENCODED RDB FILE ---
@@ -645,10 +564,9 @@ class CommandHandler {
     }
 
     store.set(key, { value, expiresAt });
-    console.log(`SET ${key} -> ${value}${expiresAt ? ` (expires at ${new Date(expiresAt).toISOString()})` : ""}`);
     
-    // Propagate to replicas if this is a master and we have a connection (not from replica)
-    if (this.config.role === ROLES.MASTER && connection) {
+    // Propagate to replicas if this is a master
+    if (this.config.role === ROLES.MASTER) {
       const command = serialize.array(args);
       const commandBytes = Buffer.byteLength(command);
       this.replicaManager.propagateCommand(command, commandBytes);
@@ -864,33 +782,12 @@ async function main() {
     
     // Start replica handshake after server is listening
     if (config.role === ROLES.SLAVE) {
-      const handshake = new ReplicaHandshake(config, commandHandler);
+      const handshake = new ReplicaHandshake(config,commandHandler);
       // Start handshake in background
-      setImmediate(() => {
-        handshake.start().catch(error => {
-          console.error("Failed to start replica handshake:", error.message);
-        });
-      });
+      setImmediate(() => handshake.start());
     }
-  });
-
-  // Handle graceful shutdown
-  process.on('SIGINT', () => {
-    console.log('Shutting down server...');
-    server.close(() => {
-      console.log('Server closed');
-      // Save data to RDB file
-      const pairs = Array.from(store.entries()).map(([key, { value, expiresAt }]) => ({ key, value, expiresAt }));
-      const hexString = pairs.map(({ key, value, expiresAt }) => {
-        const keyHex = Buffer.from(key, "utf8").toString("hex");
-        const valueHex = Buffer.from(value, "utf8").toString("hex");
-        const expiryHex = expiresAt ? (Math.floor(expiresAt / 1000)).toString(16).padStart(8, '0') : "00000000";
-        return `00${keyHex}${valueHex}${expiryHex}`;
-      }).join("");
-      fs.writeFileSync(path.join(config.dir, config.dbfilename), Buffer.from(hexString, "hex"));
-      console.log("Data saved to RDB file");
-      process.exit(0);
-    }
-    );
   });
 }
+
+// Start the server
+main().catch(console.error);
