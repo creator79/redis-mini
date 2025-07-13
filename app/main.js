@@ -447,49 +447,50 @@ class ReplicaHandshake {
     }
   }
 
-  processRDB() {
-  while (true) {
-    if (!this.rdbExpectedLength) {
-      // Look for the $<len>\r\n
-      const dollarIndex = this.buffer.indexOf('$');
-      if (dollarIndex !== 0) {
-        // Not yet received the $
-        return;
-      }
-
-      const crlfIndex = this.buffer.indexOf('\r\n');
-      if (crlfIndex === -1) {
-        // Wait for more
-        return;
-      }
-
-      const lenStr = this.buffer.substring(1, crlfIndex);
-      this.rdbExpectedLength = parseInt(lenStr, 10);
-
-      if (isNaN(this.rdbExpectedLength)) {
-        console.error('Invalid RDB length');
-        this.connection.destroy();
-        return;
-      }
-
-      console.log(`RDB expected length: ${this.rdbExpectedLength}`);
-      this.buffer = this.buffer.substring(crlfIndex + 2);
-    }
-
-    // Wait until we have enough data
-    if (this.buffer.length < this.rdbExpectedLength) {
+ processRDB() {
+  // If we haven't yet parsed the header, do that first
+  if (!this.rdbExpectedLength) {
+    if (!this.buffer.startsWith('$')) {
+      // Wait for more data
       return;
     }
 
-    // Skip the RDB data
-    console.log(`Processing and skipping RDB data of length ${this.rdbExpectedLength}`);
-    this.buffer = this.buffer.substring(this.rdbExpectedLength);
-    this.rdbProcessed = true;
-    this.currentStage = HANDSHAKE_STAGES.COMPLETED;
-    console.log('RDB transfer complete. Switching to replication command mode.');
+    const crlfIndex = this.buffer.indexOf('\r\n');
+    if (crlfIndex === -1) {
+      // Wait for more data
+      return;
+    }
+
+    const lenStr = this.buffer.slice(1, crlfIndex);
+    const parsedLength = parseInt(lenStr, 10);
+    if (isNaN(parsedLength) || parsedLength < 0) {
+      console.error('Invalid RDB length header from master');
+      this.connection.destroy();
+      return;
+    }
+
+    this.rdbExpectedLength = parsedLength;
+    console.log(`Parsed RDB expected length: ${this.rdbExpectedLength}`);
+    this.buffer = this.buffer.slice(crlfIndex + 2);
+  }
+
+  // Now we know how many bytes of raw payload to expect
+  if (this.buffer.length < this.rdbExpectedLength) {
+    // Wait for more
     return;
   }
+
+  // Consume exactly RDB payload
+  const rdbPayload = this.buffer.slice(0, this.rdbExpectedLength);
+  console.log(`Consuming entire RDB payload of ${this.rdbExpectedLength} bytes`);
+  this.buffer = this.buffer.slice(this.rdbExpectedLength);
+
+  // Done
+  this.rdbProcessed = true;
+  this.currentStage = HANDSHAKE_STAGES.COMPLETED;
+  console.log('RDB transfer complete. Switching to replication command mode.');
 }
+
 
 
   processReplicationBuffer() {
