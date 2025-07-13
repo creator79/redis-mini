@@ -424,68 +424,62 @@ class ReplicaHandshake {
       }
     }
   }
-
 processReplicationBuffer() {
-  try {
-    while (this.buffer.length > 0) {
-      // Handle initial RDB bulk string if present
-      if (this.rdbBytesRemaining !== null) {
-        if (this.buffer.length < this.rdbBytesRemaining) {
-          // Not enough yet, wait for more
-          this.rdbBytesRemaining -= this.buffer.length;
-          this.buffer = '';
-          return;
-        } else {
-          // Consume the RDB bytes
-          this.buffer = this.buffer.slice(this.rdbBytesRemaining);
-          this.rdbBytesRemaining = null;
-          continue;
-        }
-      }
-
-      // If we haven't yet seen the RDB bulk-string header
-      if (this.buffer.startsWith('$')) {
-        const endIdx = this.buffer.indexOf('\r\n');
-        if (endIdx === -1) return; // Wait for more
-        const lenLine = this.buffer.slice(1, endIdx);
-        this.rdbBytesRemaining = parseInt(lenLine, 10);
-        if (isNaN(this.rdbBytesRemaining)) {
-          console.error("Invalid RDB length:", lenLine);
-          return;
-        }
-        this.buffer = this.buffer.slice(endIdx + 2);
-        continue;
-      }
-
-      // Now parse RESP arrays (replicated commands)
-      if (!this.buffer.startsWith('*')) break;
-
-      const lines = this.buffer.split('\r\n');
-      const count = parseInt(lines[0].slice(1), 10);
-      const args = [];
-      let i = 1;
-
-      while (args.length < count && i < lines.length) {
-        if (!lines[i].startsWith("$")) break;
-        const len = parseInt(lines[i].slice(1), 10);
-        if (isNaN(len) || i + 1 >= lines.length) break;
-        args.push(lines[i + 1]);
-        i += 2;
-      }
-
-      if (args.length !== count) break;
-
-      // Remove consumed
-      this.buffer = lines.slice(i).join('\r\n');
-
-      console.log(`Replicating command from master:`, args);
-      this.commandHandler.handle(args, null);
+    // First, handle RDB if we're still in RDB transfer stage
+    if (this.currentStage === HANDSHAKE_STAGES.RDB_TRANSFER && !this.rdbProcessed) {
+      this.processRDB();
+      return;
     }
-  } catch (err) {
-    console.error("Error applying replication command:", err.message);
-  }
-}
 
+    // Process commands
+    try {
+      while (this.buffer.length > 0) {
+        // Skip any leftover binary data or non-command data
+        while (this.buffer.length > 0 && !this.buffer.startsWith('*')) {
+          this.buffer = this.buffer.slice(1);
+        }
+        
+        if (this.buffer.length === 0) break;
+        
+        const lines = this.buffer.split('\r\n');
+        if (!lines[0].startsWith("*")) break;
+
+        const count = parseInt(lines[0].slice(1), 10);
+        if (isNaN(count) || count <= 0) break;
+        
+        const args = [];
+        let i = 1;
+        let bytesConsumed = lines[0].length + 2; // +2 for \r\n
+
+        while (args.length < count && i < lines.length) {
+          if (!lines[i].startsWith("$")) break;
+          
+          const len = parseInt(lines[i].slice(1), 10);
+          if (isNaN(len) || i + 1 >= lines.length) break;
+          
+          bytesConsumed += lines[i].length + 2; // +2 for \r\n
+          
+          if (len >= 0) {
+            args.push(lines[i + 1]);
+            bytesConsumed += lines[i + 1].length + 2; // +2 for \r\n
+          }
+          
+          i += 2;
+        }
+
+        if (args.length !== count) break;
+
+        // Remove consumed bytes from buffer
+        this.buffer = this.buffer.slice(bytesConsumed);
+
+        // Apply the command
+        console.log(`Replicating command from master:`, args);
+        this.commandHandler.handle(args, null);
+      }
+    } catch (err) {
+      console.error("Error applying replication command:", err.message);
+    }
+  }
 }
 
 
