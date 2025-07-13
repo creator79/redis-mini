@@ -8,12 +8,14 @@ const { parseHexRDB } = require("./utils");
 //
 // --- CONFIG PARSING ---
 const args = process.argv.slice(2);
-const config = { dir: ".", dbfilename: "dump.rdb" };
+const config = { dir: ".", dbfilename: "dump.rdb", port: 6379 };
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--dir" && args[i + 1]) config.dir = args[++i];
   else if (args[i] === "--dbfilename" && args[i + 1]) config.dbfilename = args[++i];
+  else if (args[i] === "--port" && args[i + 1]) config.port = parseInt(args[++i], 10);
 }
+
 
 //
 // --- IN-MEMORY STORE ---
@@ -183,6 +185,6 @@ const server = net.createServer((conn) => {
   });
 });
 
-server.listen(6379, "127.0.0.1", () => {
-  console.log(`Server listening on 127.0.0.1:6379`);
+server.listen(config.port, "127.0.0.1", () => {
+  console.log(`Server listening on 127.0.0.1:${config.port}`);
 });
