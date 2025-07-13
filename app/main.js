@@ -30,10 +30,15 @@ for (let i = 0; i < args.length; i++) {
     config.dbfilename = args[++i];
   } else if (arg === "--port" && i + 1 < args.length) {
     config.port = parseInt(args[++i], 10);
-  } else if (arg === "--replicaof" && i + 2 < args.length) {
+  } else if (arg === "--replicaof" && i + 1 < args.length) {
     config.role = "slave";
-    config.masterHost = args[++i];
-    config.masterPort = parseInt(args[++i], 10);
+    const replicaofArg = args[++i];
+    // Parse "localhost 6379" format
+    const parts = replicaofArg.split(" ");
+    if (parts.length === 2) {
+      config.masterHost = parts[0];
+      config.masterPort = parseInt(parts[1], 10);
+    }
   }
 }
 
