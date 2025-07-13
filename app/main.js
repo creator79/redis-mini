@@ -29,7 +29,8 @@ const COMMANDS = {
   KEYS: "KEYS",
   INFO: "INFO",
   REPLCONF: "REPLCONF",
-  PSYNC: "PSYNC"
+  PSYNC: "PSYNC",
+  WAIT: "WAIT"
 };
 
 const DEFAULT_CONFIG = {
@@ -99,6 +100,7 @@ const serialize = {
   error: (msg) => `-${msg}\r\n`,
   bulk: (msg) => (msg == null ? `$-1\r\n` : `$${msg.length}\r\n${msg}\r\n`),
   array: (items) => `*${items.length}\r\n` + items.map(serialize.bulk).join(""),
+  integer: (num) => `:${num}\r\n`,
 };
 
 //
@@ -118,6 +120,148 @@ function parseRESP(data) {
   }
 
   return result;
+}
+
+//
+// --- REPLICA MANAGEMENT ---
+class ReplicaManager {
+  constructor() {
+    this.replicas = new Map(); // connection -> { offset, lastAck, connection }
+    this.masterOffset = 0;
+    this.waitingCommands = new Map(); // commandId -> { requiredReplicas, timeout, resolve, reject }
+  }
+
+  addReplica(connection) {
+    const replica = {
+      offset: 0,
+      lastAck: Date.now(),
+      connection: connection
+    };
+    this.replicas.set(connection, replica);
+    console.log(`Added replica. Total replicas: ${this.replicas.size}`);
+  }
+
+  removeReplica(connection) {
+    this.replicas.delete(connection);
+    console.log(`Removed replica. Total replicas: ${this.replicas.size}`);
+  }
+
+  propagateCommand(command, commandBytes) {
+    if (this.replicas.size === 0) return;
+
+    console.log(`Propagating command to ${this.replicas.size} replicas:`, command);
+    
+    // Update master offset
+    this.masterOffset += commandBytes;
+    
+    // Send command to all replicas
+    for (const [connection, replica] of this.replicas) {
+      try {
+        connection.write(command);
+        console.log(`Sent command to replica`);
+      } catch (error) {
+        console.error(`Error sending to replica:`, error.message);
+        this.removeReplica(connection);
+      }
+    }
+  }
+
+  updateReplicaOffset(connection, offset) {
+    const replica = this.replicas.get(connection);
+    if (replica) {
+      replica.offset = offset;
+      replica.lastAck = Date.now();
+      console.log(`Updated replica offset to ${offset}`);
+      
+      // Check if any WAIT commands can be resolved
+      this.checkWaitingCommands();
+    }
+  }
+
+  getReplicaCount() {
+    return this.replicas.size;
+  }
+
+  getReplicasAtOffset(targetOffset) {
+    let count = 0;
+    for (const [connection, replica] of this.replicas) {
+      if (replica.offset >= targetOffset) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  waitForReplicas(numReplicas, timeout) {
+    return new Promise((resolve, reject) => {
+      const currentOffset = this.masterOffset;
+      const replicasAtOffset = this.getReplicasAtOffset(currentOffset);
+      
+      console.log(`WAIT: Need ${numReplicas} replicas at offset ${currentOffset}, currently have ${replicasAtOffset}`);
+      
+      // If we already have enough replicas at the current offset, resolve immediately
+      if (replicasAtOffset >= numReplicas) {
+        console.log(`WAIT: Already have enough replicas`);
+        resolve(replicasAtOffset);
+        return;
+      }
+      
+      // If we have no replicas, resolve with 0
+      if (this.replicas.size === 0) {
+        console.log(`WAIT: No replicas connected`);
+        resolve(0);
+        return;
+      }
+      
+      // Send REPLCONF GETACK to all replicas to get their current offset
+      const getackCommand = serialize.array([COMMANDS.REPLCONF, "GETACK", "*"]);
+      for (const [connection, replica] of this.replicas) {
+        try {
+          connection.write(getackCommand);
+          console.log(`Sent GETACK to replica`);
+        } catch (error) {
+          console.error(`Error sending GETACK to replica:`, error.message);
+          this.removeReplica(connection);
+        }
+      }
+      
+      // Set up timeout
+      const timeoutId = setTimeout(() => {
+        const finalCount = this.getReplicasAtOffset(currentOffset);
+        console.log(`WAIT: Timeout reached, returning ${finalCount} replicas`);
+        resolve(finalCount);
+      }, timeout);
+      
+      // Store the wait command
+      const commandId = Date.now() + Math.random();
+      this.waitingCommands.set(commandId, {
+        requiredReplicas: numReplicas,
+        targetOffset: currentOffset,
+        timeout: timeoutId,
+        resolve: (count) => {
+          clearTimeout(timeoutId);
+          this.waitingCommands.delete(commandId);
+          resolve(count);
+        }
+      });
+    });
+  }
+
+  checkWaitingCommands() {
+    for (const [commandId, waitCmd] of this.waitingCommands) {
+      const replicasAtOffset = this.getReplicasAtOffset(waitCmd.targetOffset);
+      console.log(`Checking WAIT command: need ${waitCmd.requiredReplicas}, have ${replicasAtOffset} at offset ${waitCmd.targetOffset}`);
+      
+      if (replicasAtOffset >= waitCmd.requiredReplicas) {
+        console.log(`WAIT command satisfied with ${replicasAtOffset} replicas`);
+        waitCmd.resolve(replicasAtOffset);
+      }
+    }
+  }
+
+  getMasterOffset() {
+    return this.masterOffset;
+  }
 }
 
 //
@@ -342,11 +486,12 @@ function loadData(config) {
 //
 // --- COMMAND HANDLERS ---
 class CommandHandler {
-  constructor(config) {
+  constructor(config, replicaManager) {
     this.config = config;
+    this.replicaManager = replicaManager;
   }
 
-  handle(args) {
+  handle(args, connection = null) {
     if (args.length === 0) return serialize.error("ERR empty command");
 
     const cmd = args[0].toUpperCase();
@@ -357,7 +502,7 @@ class CommandHandler {
       case COMMANDS.ECHO:
         return this.handleEcho(args);
       case COMMANDS.SET:
-        return this.handleSet(args);
+        return this.handleSet(args, connection);
       case COMMANDS.GET:
         return this.handleGet(args);
       case COMMANDS.CONFIG:
@@ -367,9 +512,11 @@ class CommandHandler {
       case COMMANDS.INFO:
         return this.handleInfo(args);
       case COMMANDS.REPLCONF:
-        return this.handleReplconf(args);
+        return this.handleReplconf(args, connection);
       case COMMANDS.PSYNC:
-        return this.handlePsync(args);
+        return this.handlePsync(args, connection);
+      case COMMANDS.WAIT:
+        return this.handleWait(args);
       default:
         return serialize.error(`ERR unknown command '${cmd}'`);
     }
@@ -386,7 +533,7 @@ class CommandHandler {
     return serialize.bulk(args[1]);
   }
 
-  handleSet(args) {
+  handleSet(args, connection) {
     if (args.length < 3) {
       return serialize.error("ERR wrong number of arguments for SET");
     }
@@ -406,6 +553,14 @@ class CommandHandler {
     }
 
     store.set(key, { value, expiresAt });
+    
+    // Propagate to replicas if this is a master
+    if (this.config.role === ROLES.MASTER) {
+      const command = serialize.array(args);
+      const commandBytes = Buffer.byteLength(command);
+      this.replicaManager.propagateCommand(command, commandBytes);
+    }
+
     return serialize.simple("OK");
   }
 
@@ -462,7 +617,7 @@ class CommandHandler {
       
       if (this.config.role === ROLES.MASTER) {
         infoLines.push(`master_replid:${this.config.masterReplid}`);
-        infoLines.push(`master_repl_offset:${this.config.masterReplOffset}`);
+        infoLines.push(`master_repl_offset:${this.replicaManager.getMasterOffset()}`);
       }
       
       return serialize.bulk(infoLines.join("\r\n"));
@@ -470,15 +625,95 @@ class CommandHandler {
     return serialize.error("ERR only INFO replication supported for now");
   }
 
-  handleReplconf(args) {
-    // Master receives REPLCONF from replicas during handshake
-    return serialize.simple("OK");
+  handleReplconf(args, connection) {
+    if (args.length < 2) {
+      return serialize.error("ERR wrong number of arguments for REPLCONF");
+    }
+
+    const subcommand = args[1].toUpperCase();
+    
+    switch (subcommand) {
+      case "LISTENING-PORT":
+        // During handshake - just acknowledge
+        return serialize.simple("OK");
+        
+      case "CAPA":
+        // During handshake - just acknowledge
+        return serialize.simple("OK");
+        
+      case "ACK":
+        // Replica is acknowledging receipt of commands
+        if (args.length >= 3) {
+          const offset = parseInt(args[2], 10);
+          if (!isNaN(offset) && connection) {
+            console.log(`Received ACK from replica with offset ${offset}`);
+            this.replicaManager.updateReplicaOffset(connection, offset);
+          }
+        }
+        // Don't send a response for ACK
+        return null;
+        
+      case "GETACK":
+        // Master is asking for current offset - this should be handled by replica
+        // For now, just return current offset (slaves don't track offset in this implementation)
+        return serialize.array([COMMANDS.REPLCONF, "ACK", "0"]);
+        
+      default:
+        return serialize.simple("OK");
+    }
   }
 
-  handlePsync(args) {
-    // Master receives PSYNC from replicas during handshake
-    // For now, just acknowledge - full implementation in later stages
-    return serialize.simple(`FULLRESYNC ${this.config.masterReplid} ${this.config.masterReplOffset}`);
+  handlePsync(args, connection) {
+    if (this.config.role !== ROLES.MASTER) {
+      return serialize.error("ERR PSYNC can only be sent to master");
+    }
+
+    // Add this connection as a replica
+    if (connection) {
+      this.replicaManager.addReplica(connection);
+    }
+
+    // Send FULLRESYNC response
+    const response = serialize.simple(`FULLRESYNC ${this.config.masterReplid} ${this.replicaManager.getMasterOffset()}`);
+    
+    // Send empty RDB file after FULLRESYNC
+    if (connection) {
+      setImmediate(() => {
+        // Send empty RDB file (just the header)
+        const emptyRdb = Buffer.from("524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2", "hex");
+        connection.write(`$${emptyRdb.length}\r\n`);
+        connection.write(emptyRdb);
+      });
+    }
+    
+    return response;
+  }
+
+  async handleWait(args) {
+    if (args.length < 3) {
+      return serialize.error("ERR wrong number of arguments for WAIT");
+    }
+
+    const numReplicas = parseInt(args[1], 10);
+    const timeout = parseInt(args[2], 10);
+
+    if (isNaN(numReplicas) || isNaN(timeout)) {
+      return serialize.error("ERR invalid arguments for WAIT");
+    }
+
+    if (this.config.role !== ROLES.MASTER) {
+      return serialize.error("ERR WAIT can only be sent to master");
+    }
+
+    console.log(`WAIT command: waiting for ${numReplicas} replicas with timeout ${timeout}ms`);
+
+    try {
+      const count = await this.replicaManager.waitForReplicas(numReplicas, timeout);
+      return serialize.integer(count);
+    } catch (error) {
+      console.error("Error in WAIT command:", error.message);
+      return serialize.error("ERR WAIT command failed");
+    }
   }
 }
 
@@ -491,18 +726,24 @@ async function main() {
   // Load data from RDB file
   loadData(config);
 
+  // Create replica manager (only used by master)
+  const replicaManager = new ReplicaManager();
+
   // Create command handler
-  const commandHandler = new CommandHandler(config);
+  const commandHandler = new CommandHandler(config, replicaManager);
 
   // Start server first
   const server = net.createServer((conn) => {
     console.log("Client connected");
 
-    conn.on("data", (data) => {
+    conn.on("data", async (data) => {
       try {
         const args = parseRESP(data);
-        const response = commandHandler.handle(args);
-        conn.write(response);
+        const response = await commandHandler.handle(args, conn);
+        
+        if (response !== null) {
+          conn.write(response);
+        }
       } catch (err) {
         console.error("Error:", err.message);
         conn.write(serialize.error("ERR parsing error"));
@@ -511,6 +752,17 @@ async function main() {
 
     conn.on("end", () => {
       console.log("Client disconnected");
+      // Remove from replicas if it was one
+      if (config.role === ROLES.MASTER) {
+        replicaManager.removeReplica(conn);
+      }
+    });
+
+    conn.on("error", (err) => {
+      console.error("Connection error:", err.message);
+      if (config.role === ROLES.MASTER) {
+        replicaManager.removeReplica(conn);
+      }
     });
   });
 
