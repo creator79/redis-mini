@@ -9,7 +9,7 @@ const { parseHexRDB } = require("./utils");
 // --- ENUMS AND CONSTANTS ---
 const ROLES = {
   MASTER: "master",
-  SLAVE: "slave"
+  SLAVE: "slave",
 };
 
 const HANDSHAKE_STAGES = {
@@ -17,7 +17,7 @@ const HANDSHAKE_STAGES = {
   REPLCONF_LISTENING_PORT: "REPLCONF_LISTENING_PORT",
   REPLCONF_CAPA: "REPLCONF_CAPA",
   PSYNC: "PSYNC",
-  COMPLETED: "COMPLETED"
+  COMPLETED: "COMPLETED",
 };
 
 const COMMANDS = {
@@ -30,7 +30,7 @@ const COMMANDS = {
   INFO: "INFO",
   REPLCONF: "REPLCONF",
   PSYNC: "PSYNC",
-  WAIT: "WAIT"
+  WAIT: "WAIT",
 };
 
 const DEFAULT_CONFIG = {
@@ -41,7 +41,7 @@ const DEFAULT_CONFIG = {
   masterHost: null,
   masterPort: null,
   masterReplid: "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb",
-  masterReplOffset: 0
+  masterReplOffset: 0,
 };
 
 //
@@ -52,26 +52,26 @@ function parseArguments() {
 
   for (let i = 0; i < args.length; i++) {
     const arg = args[i];
-    
+
     switch (arg) {
       case "--dir":
         if (i + 1 < args.length) {
           config.dir = args[++i];
         }
         break;
-        
+
       case "--dbfilename":
         if (i + 1 < args.length) {
           config.dbfilename = args[++i];
         }
         break;
-        
+
       case "--port":
         if (i + 1 < args.length) {
           config.port = parseInt(args[++i], 10);
         }
         break;
-        
+
       case "--replicaof":
         if (i + 1 < args.length) {
           config.role = ROLES.SLAVE;
@@ -135,7 +135,7 @@ class ReplicaManager {
     const replica = {
       offset: 0,
       lastAck: Date.now(),
-      connection: connection
+      connection: connection,
     };
     this.replicas.set(connection, replica);
     console.log(`Added replica. Total replicas: ${this.replicas.size}`);
@@ -149,11 +149,14 @@ class ReplicaManager {
   propagateCommand(command, commandBytes) {
     if (this.replicas.size === 0) return;
 
-    console.log(`Propagating command to ${this.replicas.size} replicas:`, command);
-    
+    console.log(
+      `Propagating command to ${this.replicas.size} replicas:`,
+      command
+    );
+
     // Update master offset
     this.masterOffset += commandBytes;
-    
+
     // Send command to all replicas
     for (const [connection, replica] of this.replicas) {
       try {
@@ -172,7 +175,7 @@ class ReplicaManager {
       replica.offset = offset;
       replica.lastAck = Date.now();
       console.log(`Updated replica offset to ${offset}`);
-      
+
       // Check if any WAIT commands can be resolved
       this.checkWaitingCommands();
     }
@@ -196,23 +199,25 @@ class ReplicaManager {
     return new Promise((resolve, reject) => {
       const currentOffset = this.masterOffset;
       const replicasAtOffset = this.getReplicasAtOffset(currentOffset);
-      
-      console.log(`WAIT: Need ${numReplicas} replicas at offset ${currentOffset}, currently have ${replicasAtOffset}`);
-      
+
+      console.log(
+        `WAIT: Need ${numReplicas} replicas at offset ${currentOffset}, currently have ${replicasAtOffset}`
+      );
+
       // If we already have enough replicas at the current offset, resolve immediately
       if (replicasAtOffset >= numReplicas) {
         console.log(`WAIT: Already have enough replicas`);
         resolve(replicasAtOffset);
         return;
       }
-      
+
       // If we have no replicas, resolve with 0
       if (this.replicas.size === 0) {
         console.log(`WAIT: No replicas connected`);
         resolve(0);
         return;
       }
-      
+
       // Send REPLCONF GETACK to all replicas to get their current offset
       const getackCommand = serialize.array([COMMANDS.REPLCONF, "GETACK", "*"]);
       for (const [connection, replica] of this.replicas) {
@@ -224,14 +229,14 @@ class ReplicaManager {
           this.removeReplica(connection);
         }
       }
-      
+
       // Set up timeout
       const timeoutId = setTimeout(() => {
         const finalCount = this.getReplicasAtOffset(currentOffset);
         console.log(`WAIT: Timeout reached, returning ${finalCount} replicas`);
         resolve(finalCount);
       }, timeout);
-      
+
       // Store the wait command
       const commandId = Date.now() + Math.random();
       this.waitingCommands.set(commandId, {
@@ -242,7 +247,7 @@ class ReplicaManager {
           clearTimeout(timeoutId);
           this.waitingCommands.delete(commandId);
           resolve(count);
-        }
+        },
       });
     });
   }
@@ -250,8 +255,10 @@ class ReplicaManager {
   checkWaitingCommands() {
     for (const [commandId, waitCmd] of this.waitingCommands) {
       const replicasAtOffset = this.getReplicasAtOffset(waitCmd.targetOffset);
-      console.log(`Checking WAIT command: need ${waitCmd.requiredReplicas}, have ${replicasAtOffset} at offset ${waitCmd.targetOffset}`);
-      
+      console.log(
+        `Checking WAIT command: need ${waitCmd.requiredReplicas}, have ${replicasAtOffset} at offset ${waitCmd.targetOffset}`
+      );
+
       if (replicasAtOffset >= waitCmd.requiredReplicas) {
         console.log(`WAIT command satisfied with ${replicasAtOffset} replicas`);
         waitCmd.resolve(replicasAtOffset);
@@ -273,7 +280,7 @@ class ReplicaHandshake {
     this.currentStage = HANDSHAKE_STAGES.PING;
     this.connection = null;
     this.pendingResolve = null;
-    this.buffer = '';
+    this.buffer = "";
     this.replicationMode = false;
   }
 
@@ -283,8 +290,10 @@ class ReplicaHandshake {
       return;
     }
 
-    console.log(`Starting handshake with master at ${this.config.masterHost}:${this.config.masterPort}`);
-    
+    console.log(
+      `Starting handshake with master at ${this.config.masterHost}:${this.config.masterPort}`
+    );
+
     try {
       await this.connectToMaster();
       await this.executeHandshake();
@@ -308,12 +317,12 @@ class ReplicaHandshake {
         }
       );
 
-      this.connection.on('error', (error) => {
+      this.connection.on("error", (error) => {
         console.error("Connection error:", error.message);
         reject(error);
       });
 
-      this.connection.on('data', (data) => {
+      this.connection.on("data", (data) => {
         this.buffer += data.toString();
         if (this.replicationMode) {
           this.processReplicationBuffer();
@@ -322,7 +331,7 @@ class ReplicaHandshake {
         }
       });
 
-      this.connection.on('close', () => {
+      this.connection.on("close", () => {
         console.log("Connection to master closed");
       });
     });
@@ -330,12 +339,14 @@ class ReplicaHandshake {
 
   async executeHandshake() {
     console.log("Starting handshake sequence");
-    
+
     await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.PING);
-    await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.REPLCONF_LISTENING_PORT);
+    await this.sendCommandAndWaitForResponse(
+      HANDSHAKE_STAGES.REPLCONF_LISTENING_PORT
+    );
     await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.REPLCONF_CAPA);
     await this.sendCommandAndWaitForResponse(HANDSHAKE_STAGES.PSYNC);
-    
+
     console.log("Handshake completed successfully");
     this.currentStage = HANDSHAKE_STAGES.COMPLETED;
   }
@@ -347,13 +358,17 @@ class ReplicaHandshake {
 
       switch (stage) {
         case HANDSHAKE_STAGES.PING:
-          this.sendPing(); break;
+          this.sendPing();
+          break;
         case HANDSHAKE_STAGES.REPLCONF_LISTENING_PORT:
-          this.sendReplconfListeningPort(); break;
+          this.sendReplconfListeningPort();
+          break;
         case HANDSHAKE_STAGES.REPLCONF_CAPA:
-          this.sendReplconfCapa(); break;
+          this.sendReplconfCapa();
+          break;
         case HANDSHAKE_STAGES.PSYNC:
-          this.sendPsync(); break;
+          this.sendPsync();
+          break;
         default:
           reject(new Error(`Unknown stage: ${stage}`));
       }
@@ -375,7 +390,11 @@ class ReplicaHandshake {
 
   sendReplconfListeningPort() {
     console.log("Sending REPLCONF listening-port to master");
-    const command = serialize.array([COMMANDS.REPLCONF, "listening-port", this.config.port.toString()]);
+    const command = serialize.array([
+      COMMANDS.REPLCONF,
+      "listening-port",
+      this.config.port.toString(),
+    ]);
     this.connection.write(command);
   }
 
@@ -392,12 +411,15 @@ class ReplicaHandshake {
   }
 
   handleMasterResponse() {
-    while (this.buffer.includes('\r\n')) {
-      let responseEnd = this.buffer.indexOf('\r\n');
+    while (this.buffer.includes("\r\n")) {
+      let responseEnd = this.buffer.indexOf("\r\n");
       let response = this.buffer.substring(0, responseEnd + 2);
       this.buffer = this.buffer.substring(responseEnd + 2);
-      
-      console.log(`Received from master (${this.currentStage}):`, response.trim());
+
+      console.log(
+        `Received from master (${this.currentStage}):`,
+        response.trim()
+      );
 
       switch (this.currentStage) {
         case HANDSHAKE_STAGES.PING:
@@ -424,64 +446,72 @@ class ReplicaHandshake {
       }
     }
   }
-processReplicationBuffer() {
-    // First, handle RDB if we're still in RDB transfer stage
-    if (this.currentStage === HANDSHAKE_STAGES.RDB_TRANSFER && !this.rdbProcessed) {
-      this.processRDB();
-      return;
-    }
-
-    // Process commands
+  processReplicationBuffer() {
     try {
       while (this.buffer.length > 0) {
         // Skip any leftover binary data or non-command data
-        while (this.buffer.length > 0 && !this.buffer.startsWith('*')) {
+        while (this.buffer.length > 0 && !this.buffer.startsWith("*")) {
           this.buffer = this.buffer.slice(1);
         }
-        
+
         if (this.buffer.length === 0) break;
-        
-        const lines = this.buffer.split('\r\n');
+
+        // Find the end of the current command
+        const lines = this.buffer.split("\r\n");
         if (!lines[0].startsWith("*")) break;
 
         const count = parseInt(lines[0].slice(1), 10);
         if (isNaN(count) || count <= 0) break;
-        
+
         const args = [];
         let i = 1;
         let bytesConsumed = lines[0].length + 2; // +2 for \r\n
 
+        // Parse each argument
         while (args.length < count && i < lines.length) {
           if (!lines[i].startsWith("$")) break;
-          
+
           const len = parseInt(lines[i].slice(1), 10);
           if (isNaN(len) || i + 1 >= lines.length) break;
-          
+
           bytesConsumed += lines[i].length + 2; // +2 for \r\n
-          
+
           if (len >= 0) {
             args.push(lines[i + 1]);
             bytesConsumed += lines[i + 1].length + 2; // +2 for \r\n
           }
-          
+
           i += 2;
         }
 
+        // If we don't have all arguments, wait for more data
         if (args.length !== count) break;
 
         // Remove consumed bytes from buffer
         this.buffer = this.buffer.slice(bytesConsumed);
 
-        // Apply the command
-        console.log(`Replicating command from master:`, args);
-        this.commandHandler.handle(args, null);
+        // Handle the command
+        console.log(`Received replication command:`, args);
+
+        // Check if this is a REPLCONF GETACK command
+        if (
+          args.length === 3 &&
+          args[0].toUpperCase() === "REPLCONF" &&
+          args[1].toUpperCase() === "GETACK"
+        ) {
+          console.log(`Responding to REPLCONF GETACK with offset 0`);
+          const response = serialize.array(["REPLCONF", "ACK", "0"]);
+          this.connection.write(response);
+        } else {
+          // For other commands, just process them without sending a response
+          this.commandHandler.handle(args, null);
+        }
       }
     } catch (err) {
-      console.error("Error applying replication command:", err.message);
+      console.error("Error processing replication command:", err.message);
     }
   }
 }
-
 
 //
 // --- LOAD DATA FROM HEX-ENCODED RDB FILE ---
@@ -502,12 +532,18 @@ function loadData(config) {
 
     pairs.forEach(({ key, value, expiresAt }) => {
       if (expiresAt && Date.now() > expiresAt) {
-        console.log(`Skipping expired key: ${key} (expired at ${new Date(expiresAt).toISOString()})`);
+        console.log(
+          `Skipping expired key: ${key} (expired at ${new Date(
+            expiresAt
+          ).toISOString()})`
+        );
         return;
       }
 
       store.set(key, { value, expiresAt });
-      const expiryInfo = expiresAt ? ` (expires at ${new Date(expiresAt).toISOString()})` : "";
+      const expiryInfo = expiresAt
+        ? ` (expires at ${new Date(expiresAt).toISOString()})`
+        : "";
       console.log(`Loaded key: ${key} -> ${value}${expiryInfo}`);
     });
 
@@ -588,7 +624,7 @@ class CommandHandler {
     }
 
     store.set(key, { value, expiresAt });
-    
+
     // Propagate to replicas if this is a master
     if (this.config.role === ROLES.MASTER) {
       const command = serialize.array(args);
@@ -619,13 +655,13 @@ class CommandHandler {
     if (args.length === 3 && args[1].toUpperCase() === "GET") {
       const param = args[2];
       let value = "";
-      
+
       if (param === "dir") {
         value = this.config.dir;
       } else if (param === "dbfilename") {
         value = this.config.dbfilename;
       }
-      
+
       return serialize.array([param, value]);
     }
     return serialize.error("ERR wrong CONFIG usage");
@@ -649,12 +685,14 @@ class CommandHandler {
   handleInfo(args) {
     if (args.length === 2 && args[1].toLowerCase() === "replication") {
       const infoLines = [`role:${this.config.role}`];
-      
+
       if (this.config.role === ROLES.MASTER) {
         infoLines.push(`master_replid:${this.config.masterReplid}`);
-        infoLines.push(`master_repl_offset:${this.replicaManager.getMasterOffset()}`);
+        infoLines.push(
+          `master_repl_offset:${this.replicaManager.getMasterOffset()}`
+        );
       }
-      
+
       return serialize.bulk(infoLines.join("\r\n"));
     }
     return serialize.error("ERR only INFO replication supported for now");
@@ -666,16 +704,16 @@ class CommandHandler {
     }
 
     const subcommand = args[1].toUpperCase();
-    
+
     switch (subcommand) {
       case "LISTENING-PORT":
         // During handshake - just acknowledge
         return serialize.simple("OK");
-        
+
       case "CAPA":
         // During handshake - just acknowledge
         return serialize.simple("OK");
-        
+
       case "ACK":
         // Replica is acknowledging receipt of commands
         if (args.length >= 3) {
@@ -687,12 +725,12 @@ class CommandHandler {
         }
         // Don't send a response for ACK
         return null;
-        
+
       case "GETACK":
         // Master is asking for current offset - this should be handled by replica
         // For now, just return current offset (slaves don't track offset in this implementation)
         return serialize.array([COMMANDS.REPLCONF, "ACK", "0"]);
-        
+
       default:
         return serialize.simple("OK");
     }
@@ -709,18 +747,25 @@ class CommandHandler {
     }
 
     // Send FULLRESYNC response
-    const response = serialize.simple(`FULLRESYNC ${this.config.masterReplid} ${this.replicaManager.getMasterOffset()}`);
-    
+    const response = serialize.simple(
+      `FULLRESYNC ${
+        this.config.masterReplid
+      } ${this.replicaManager.getMasterOffset()}`
+    );
+
     // Send empty RDB file after FULLRESYNC
     if (connection) {
       setImmediate(() => {
         // Send empty RDB file (just the header)
-        const emptyRdb = Buffer.from("524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2", "hex");
+        const emptyRdb = Buffer.from(
+          "524544495330303131fa0972656469732d76657205372e322e30fa0a72656469732d62697473c040fa056374696d65c26d08bc65fa08757365642d6d656dc2b0c41000fa08616f662d62617365c000fff06e3bfec0ff5aa2",
+          "hex"
+        );
         connection.write(`$${emptyRdb.length}\r\n`);
         connection.write(emptyRdb);
       });
     }
-    
+
     return response;
   }
 
@@ -740,10 +785,15 @@ class CommandHandler {
       return serialize.error("ERR WAIT can only be sent to master");
     }
 
-    console.log(`WAIT command: waiting for ${numReplicas} replicas with timeout ${timeout}ms`);
+    console.log(
+      `WAIT command: waiting for ${numReplicas} replicas with timeout ${timeout}ms`
+    );
 
     try {
-      const count = await this.replicaManager.waitForReplicas(numReplicas, timeout);
+      const count = await this.replicaManager.waitForReplicas(
+        numReplicas,
+        timeout
+      );
       return serialize.integer(count);
     } catch (error) {
       console.error("Error in WAIT command:", error.message);
@@ -775,7 +825,7 @@ async function main() {
       try {
         const args = parseRESP(data);
         const response = await commandHandler.handle(args, conn);
-        
+
         if (response !== null) {
           conn.write(response);
         }
@@ -803,10 +853,10 @@ async function main() {
 
   server.listen(config.port, "127.0.0.1", () => {
     console.log(`Server listening on 127.0.0.1:${config.port}`);
-    
+
     // Start replica handshake after server is listening
     if (config.role === ROLES.SLAVE) {
-      const handshake = new ReplicaHandshake(config,commandHandler);
+      const handshake = new ReplicaHandshake(config, commandHandler);
       // Start handshake in background
       setImmediate(() => handshake.start());
     }
