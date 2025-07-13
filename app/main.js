@@ -11,14 +11,15 @@ const ROLES = {
   MASTER: "master",
   SLAVE: "slave",
 };
-
 const HANDSHAKE_STAGES = {
   PING: "PING",
   REPLCONF_LISTENING_PORT: "REPLCONF_LISTENING_PORT",
   REPLCONF_CAPA: "REPLCONF_CAPA",
   PSYNC: "PSYNC",
-  COMPLETED: "COMPLETED",
+  RDB_TRANSFER: "RDB_TRANSFER",
+  COMPLETED: "COMPLETED"
 };
+
 
 const COMMANDS = {
   PING: "PING",
@@ -280,8 +281,10 @@ class ReplicaHandshake {
     this.currentStage = HANDSHAKE_STAGES.PING;
     this.connection = null;
     this.pendingResolve = null;
-    this.buffer = "";
+    this.buffer = '';
     this.replicationMode = false;
+    this.rdbProcessed = false;
+    this.rdbExpectedLength = 0;
   }
 
   async start() {
@@ -411,15 +414,12 @@ class ReplicaHandshake {
   }
 
   handleMasterResponse() {
-    while (this.buffer.includes("\r\n")) {
-      let responseEnd = this.buffer.indexOf("\r\n");
+    while (this.buffer.includes('\r\n')) {
+      let responseEnd = this.buffer.indexOf('\r\n');
       let response = this.buffer.substring(0, responseEnd + 2);
       this.buffer = this.buffer.substring(responseEnd + 2);
-
-      console.log(
-        `Received from master (${this.currentStage}):`,
-        response.trim()
-      );
+      
+      console.log(`Received from master (${this.currentStage}):`, response.trim());
 
       switch (this.currentStage) {
         case HANDSHAKE_STAGES.PING:
@@ -436,33 +436,66 @@ class ReplicaHandshake {
         case HANDSHAKE_STAGES.PSYNC:
           if (response.includes("FULLRESYNC")) {
             console.log("Full resync initiated");
+            this.currentStage = HANDSHAKE_STAGES.RDB_TRANSFER;
             if (this.pendingResolve) {
               this.pendingResolve();
               this.pendingResolve = null;
             }
-            // Next data will be RDB dump and commands
           }
           break;
       }
     }
   }
+
+  processRDB() {
+    // Look for RDB length indicator
+    if (!this.rdbExpectedLength) {
+      const dollarIndex = this.buffer.indexOf('$');
+      if (dollarIndex !== -1) {
+        const crlfIndex = this.buffer.indexOf('\r\n', dollarIndex);
+        if (crlfIndex !== -1) {
+          this.rdbExpectedLength = parseInt(this.buffer.substring(dollarIndex + 1, crlfIndex), 10);
+          this.buffer = this.buffer.substring(crlfIndex + 2);
+          console.log(`RDB expected length: ${this.rdbExpectedLength}`);
+        }
+      }
+    }
+
+    // Process RDB data
+    if (this.rdbExpectedLength && this.buffer.length >= this.rdbExpectedLength) {
+      console.log(`Processing RDB data of length ${this.rdbExpectedLength}`);
+      // Skip the RDB data
+      this.buffer = this.buffer.substring(this.rdbExpectedLength);
+      this.rdbProcessed = true;
+      this.currentStage = HANDSHAKE_STAGES.COMPLETED;
+      console.log("RDB processing completed, entering replication mode");
+    }
+  }
+
   processReplicationBuffer() {
+    // First, handle RDB if we're still in RDB transfer stage
+    if (this.currentStage === HANDSHAKE_STAGES.RDB_TRANSFER && !this.rdbProcessed) {
+      this.processRDB();
+      return;
+    }
+
+    // Process replication commands
     try {
       while (this.buffer.length > 0) {
         // Skip any leftover binary data or non-command data
-        while (this.buffer.length > 0 && !this.buffer.startsWith("*")) {
+        while (this.buffer.length > 0 && !this.buffer.startsWith('*')) {
           this.buffer = this.buffer.slice(1);
         }
-
+        
         if (this.buffer.length === 0) break;
-
+        
         // Find the end of the current command
-        const lines = this.buffer.split("\r\n");
+        const lines = this.buffer.split('\r\n');
         if (!lines[0].startsWith("*")) break;
 
         const count = parseInt(lines[0].slice(1), 10);
         if (isNaN(count) || count <= 0) break;
-
+        
         const args = [];
         let i = 1;
         let bytesConsumed = lines[0].length + 2; // +2 for \r\n
@@ -470,17 +503,17 @@ class ReplicaHandshake {
         // Parse each argument
         while (args.length < count && i < lines.length) {
           if (!lines[i].startsWith("$")) break;
-
+          
           const len = parseInt(lines[i].slice(1), 10);
           if (isNaN(len) || i + 1 >= lines.length) break;
-
+          
           bytesConsumed += lines[i].length + 2; // +2 for \r\n
-
+          
           if (len >= 0) {
             args.push(lines[i + 1]);
             bytesConsumed += lines[i + 1].length + 2; // +2 for \r\n
           }
-
+          
           i += 2;
         }
 
@@ -492,15 +525,14 @@ class ReplicaHandshake {
 
         // Handle the command
         console.log(`Received replication command:`, args);
-
+        
         // Check if this is a REPLCONF GETACK command
-        if (
-          args.length === 3 &&
-          args[0].toUpperCase() === "REPLCONF" &&
-          args[1].toUpperCase() === "GETACK"
-        ) {
+        if (args.length === 3 && 
+            args[0].toUpperCase() === 'REPLCONF' && 
+            args[1].toUpperCase() === 'GETACK') {
+          
           console.log(`Responding to REPLCONF GETACK with offset 0`);
-          const response = serialize.array(["REPLCONF", "ACK", "0"]);
+          const response = serialize.array(['REPLCONF', 'ACK', '0']);
           this.connection.write(response);
         } else {
           // For other commands, just process them without sending a response
