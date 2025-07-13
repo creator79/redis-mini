@@ -448,29 +448,49 @@ class ReplicaHandshake {
   }
 
   processRDB() {
-    // Look for RDB length indicator
+  while (true) {
     if (!this.rdbExpectedLength) {
+      // Look for the $<len>\r\n
       const dollarIndex = this.buffer.indexOf('$');
-      if (dollarIndex !== -1) {
-        const crlfIndex = this.buffer.indexOf('\r\n', dollarIndex);
-        if (crlfIndex !== -1) {
-          this.rdbExpectedLength = parseInt(this.buffer.substring(dollarIndex + 1, crlfIndex), 10);
-          this.buffer = this.buffer.substring(crlfIndex + 2);
-          console.log(`RDB expected length: ${this.rdbExpectedLength}`);
-        }
+      if (dollarIndex !== 0) {
+        // Not yet received the $
+        return;
       }
+
+      const crlfIndex = this.buffer.indexOf('\r\n');
+      if (crlfIndex === -1) {
+        // Wait for more
+        return;
+      }
+
+      const lenStr = this.buffer.substring(1, crlfIndex);
+      this.rdbExpectedLength = parseInt(lenStr, 10);
+
+      if (isNaN(this.rdbExpectedLength)) {
+        console.error('Invalid RDB length');
+        this.connection.destroy();
+        return;
+      }
+
+      console.log(`RDB expected length: ${this.rdbExpectedLength}`);
+      this.buffer = this.buffer.substring(crlfIndex + 2);
     }
 
-    // Process RDB data
-    if (this.rdbExpectedLength && this.buffer.length >= this.rdbExpectedLength) {
-      console.log(`Processing RDB data of length ${this.rdbExpectedLength}`);
-      // Skip the RDB data
-      this.buffer = this.buffer.substring(this.rdbExpectedLength);
-      this.rdbProcessed = true;
-      this.currentStage = HANDSHAKE_STAGES.COMPLETED;
-      console.log("RDB processing completed, entering replication mode");
+    // Wait until we have enough data
+    if (this.buffer.length < this.rdbExpectedLength) {
+      return;
     }
+
+    // Skip the RDB data
+    console.log(`Processing and skipping RDB data of length ${this.rdbExpectedLength}`);
+    this.buffer = this.buffer.substring(this.rdbExpectedLength);
+    this.rdbProcessed = true;
+    this.currentStage = HANDSHAKE_STAGES.COMPLETED;
+    console.log('RDB transfer complete. Switching to replication command mode.');
+    return;
   }
+}
+
 
   processReplicationBuffer() {
     // First, handle RDB if we're still in RDB transfer stage
