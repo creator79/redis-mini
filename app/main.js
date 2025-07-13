@@ -8,14 +8,15 @@ const { parseHexRDB } = require("./utils");
 //
 // --- CONFIG PARSING ---
 const args = process.argv.slice(2);
-const config = { dir: ".", dbfilename: "dump.rdb", port: 6379 };
+const config = { dir: ".", dbfilename: "dump.rdb", port: 8000 };
 
 for (let i = 0; i < args.length; i++) {
   if (args[i] === "--dir" && args[i + 1]) config.dir = args[++i];
-  else if (args[i] === "--dbfilename" && args[i + 1]) config.dbfilename = args[++i];
-  else if (args[i] === "--port" && args[i + 1]) config.port = parseInt(args[++i], 10);
+  else if (args[i] === "--dbfilename" && args[i + 1])
+    config.dbfilename = args[++i];
+  else if (args[i] === "--port" && args[i + 1])
+    config.port = parseInt(args[++i], 10);
 }
-
 
 //
 // --- IN-MEMORY STORE ---
@@ -60,27 +61,32 @@ function loadData() {
   }
 
   console.log(`Loading from ${fullPath}`);
-  
+
   try {
     const buffer = fs.readFileSync(fullPath);
     const hexString = buffer.toString("hex");
 
     const pairs = parseHexRDB(hexString);
-    
+
     pairs.forEach(({ key, value, expiresAt }) => {
       // Check if key has already expired
       if (expiresAt && Date.now() > expiresAt) {
-        console.log(`Skipping expired key: ${key} (expired at ${new Date(expiresAt).toISOString()})`);
+        console.log(
+          `Skipping expired key: ${key} (expired at ${new Date(
+            expiresAt
+          ).toISOString()})`
+        );
         return;
       }
-      
+
       store.set(key, { value, expiresAt });
-      const expiryInfo = expiresAt ? ` (expires at ${new Date(expiresAt).toISOString()})` : '';
+      const expiryInfo = expiresAt
+        ? ` (expires at ${new Date(expiresAt).toISOString()})`
+        : "";
       console.log(`Loaded key: ${key} -> ${value}${expiryInfo}`);
     });
-    
+
     console.log(`Successfully loaded ${pairs.length} key-value pairs`);
-    
   } catch (err) {
     console.error("Error loading RDB file:", err.message);
     console.error("Stack trace:", err.stack);
@@ -99,18 +105,22 @@ function handleCommand(args) {
       return serialize.simple("PONG");
 
     case "ECHO":
-      if (args.length < 2) return serialize.error("ERR wrong number of arguments for ECHO");
+      if (args.length < 2)
+        return serialize.error("ERR wrong number of arguments for ECHO");
       return serialize.bulk(args[1]);
 
     case "SET": {
-      if (args.length < 3) return serialize.error("ERR wrong number of arguments for SET");
-      const key = args[1], value = args[2];
+      if (args.length < 3)
+        return serialize.error("ERR wrong number of arguments for SET");
+      const key = args[1],
+        value = args[2];
       let expiresAt = null;
 
       for (let i = 3; i < args.length - 1; i++) {
         if (args[i].toUpperCase() === "PX") {
           const px = parseInt(args[i + 1], 10);
-          if (isNaN(px) || px < 0) return serialize.error("ERR invalid PX value");
+          if (isNaN(px) || px < 0)
+            return serialize.error("ERR invalid PX value");
           expiresAt = Date.now() + px;
         }
       }
@@ -120,7 +130,8 @@ function handleCommand(args) {
     }
 
     case "GET": {
-      if (args.length < 2) return serialize.error("ERR wrong number of arguments for GET");
+      if (args.length < 2)
+        return serialize.error("ERR wrong number of arguments for GET");
       const record = store.get(args[1]);
       if (!record) return serialize.bulk(null);
 
@@ -156,6 +167,12 @@ function handleCommand(args) {
         return serialize.array(validKeys);
       }
       return serialize.error("ERR only KEYS * supported");
+
+    case "INFO":
+      if (args.length === 2 && args[1].toLowerCase() === "replication") {
+        return serialize.bulk("role:master");
+      }
+      return serialize.error("ERR only INFO replication supported for now");
 
     default:
       return serialize.error(`ERR unknown command '${cmd}'`);
