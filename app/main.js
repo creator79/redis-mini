@@ -19,7 +19,9 @@ const config = {
   port: 6379,
   role: "master",
   masterHost: null,
-  masterPort: null
+  masterPort: null,
+  masterReplid: "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb",
+  masterReplOffset: 0
 };
 
 for (let i = 0; i < args.length; i++) {
@@ -197,7 +199,15 @@ function handleCommand(args) {
 
     case "INFO":
       if (args.length === 2 && args[1].toLowerCase() === "replication") {
-        return serialize.bulk(`role:${config.role}`);
+        const infoLines = [`role:${config.role}`];
+        
+        // Add master-specific info if this is a master
+        if (config.role === "master") {
+          infoLines.push(`master_replid:${config.masterReplid}`);
+          infoLines.push(`master_repl_offset:${config.masterReplOffset}`);
+        }
+        
+        return serialize.bulk(infoLines.join("\r\n"));
       }
       return serialize.error("ERR only INFO replication supported for now");
 
