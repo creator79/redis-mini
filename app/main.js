@@ -8,13 +8,15 @@ const { parseHexRDB } = require("./utils");
 //
 // --- CONFIG PARSING ---
 const args = process.argv.slice(2);
+// Default port is 6379.
+//  But --port overrides it.
 const config = {
-  dir: '.',
-  dbfilename: 'dump.rdb',
-  port: 6380,
-  role: 'slave',
-  masterHost: 'localhost',
-  masterPort: 6379
+  dir: ".",
+  dbfilename: "dump.rdb",
+  port: 6379,
+  role: "master",
+  masterHost: null,
+  masterPort: null
 };
 
 for (let i = 0; i < args.length; i++) {
@@ -30,6 +32,7 @@ for (let i = 0; i < args.length; i++) {
     config.masterPort = parseInt(args[++i], 10);
   }
 }
+
 
 //
 // --- IN-MEMORY STORE ---
