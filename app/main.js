@@ -9,12 +9,12 @@ const { parseHexRDB } = require("./utils");
 // --- CONFIG PARSING ---
 const args = process.argv.slice(2);
 const config = {
-  dir: ".",
-  dbfilename: "dump.rdb",
-  port: 6379,
-  role: "master",
-  masterHost: null,
-  masterPort: null,
+  dir: '.',
+  dbfilename: 'dump.rdb',
+  port: 6380,
+  role: 'slave',
+  masterHost: 'localhost',
+  masterPort: 6379
 };
 
 for (let i = 0; i < args.length; i++) {
