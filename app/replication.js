@@ -1,12 +1,13 @@
 // replication.js - Simple Redis replication
 const net = require('net');
-const { serializeRESP, parseRESP, parseEvents } = require('./protocol');
+const { serializeRESP: encodeArray, parseRESP: parseRequest, parseEvents } = require('./protocol');
 
 /**
  * Connect to master server as a replica
  * @param {Object} config - Server configuration
  * @param {Map} store - Key-value store
  * @param {Map} expiryTimes - Key expiry times
+ * @returns {net.Socket} - Connection to master
  */
 function connectToMaster(config, store, expiryTimes) {
   console.log(`Connecting to master at ${config.masterHost}:${config.masterPort}`);
@@ -18,7 +19,7 @@ function connectToMaster(config, store, expiryTimes) {
   }, () => {
     console.log('Connected to master');
     
-    // Start handshake
+    // Start handshake with master server
     performHandshake(client, config);
   });
   
@@ -94,7 +95,7 @@ function connectToMaster(config, store, expiryTimes) {
           
           try {
             // Parse command
-            const parsedRequest = parseRESP(request);
+            const parsedRequest = parseRequest(request);
             const command = parsedRequest[0].toUpperCase();
             const args = parsedRequest.slice(1);
             
@@ -110,7 +111,7 @@ function connectToMaster(config, store, expiryTimes) {
             // Handle REPLCONF GETACK command
             if (command === 'REPLCONF' && args[0].toUpperCase() === 'GETACK') {
               console.log('Received REPLCONF GETACK from master');
-              client.write(serializeRESP.array(['REPLCONF', 'ACK', '0']));
+              client.write(encodeArray(['REPLCONF', 'ACK', '0']));
               continue;
             }
             
@@ -159,19 +160,20 @@ function performHandshake(client, config) {
   
   // Send PING
   console.log('Sending PING');
-  client.write(serializeRESP.array(['PING']));
+  client.write(encodeArray(['PING']));
   
   // Send REPLCONF listening-port
   console.log('Sending REPLCONF listening-port');
-  client.write(serializeRESP.array(['REPLCONF', 'listening-port', config.port.toString()]));
+  client.write(encodeArray(['REPLCONF', 'listening-port', config.port.toString()]));
   
   // Send REPLCONF capa
   console.log('Sending REPLCONF capa');
-  client.write(serializeRESP.array(['REPLCONF', 'capa', 'psync2']));
+  client.write(encodeArray(['REPLCONF', 'capa', 'psync2']));
+  client.write(encodeArray(['REPLCONF', 'capa', 'eof']));
   
   // Send PSYNC
   console.log('Sending PSYNC');
-  client.write(serializeRESP.array(['PSYNC', '?', '-1']));
+  client.write(encodeArray(['PSYNC', '?', '-1']));
 }
 
 /**
@@ -211,7 +213,7 @@ function checkForGetAckCommand(buffer, client) {
   
   if (index !== -1) {
     console.log('Found REPLCONF GETACK command during data processing');
-    client.write(serializeRESP.array(['REPLCONF', 'ACK', '0']));
+    client.write(encodeArray(['REPLCONF', 'ACK', '0']));
     
     // Find the end of the command (the third argument)
     const cmdStart = index;
