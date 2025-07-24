@@ -401,7 +401,7 @@ function generateStreamId(userIdPart, streams, streamKey) {
     const ms = parseInt(msPart, 10);
     
     // Find the highest sequence number for this ms timestamp
-    let maxSeq = -1;
+    let maxSeq = 0; // Start from 0, so first entry will be 1
     if (streams[streamKey]) {
       for (const entry of streams[streamKey]) {
         const [entryMs, entrySeq] = entry.id.split("-").map(Number);
