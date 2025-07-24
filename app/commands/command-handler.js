@@ -97,138 +97,103 @@ function handleIncr(connection, cmdArr) {
   // Handle error case
   return encodeSimpleString('ERR value is not an integer or out of range');
 }
-
 /**
  * Handle the XADD command
  * @param {net.Socket} connection - Client connection
  * @param {string[]} cmdArr - Command array
  * @returns {string} RESP response
  */
-// function handleXadd(connection, cmdArr) {
-//   const streamKey = cmdArr[1];
-//   let id = cmdArr[2];
-
-//   // Parse XADD id (handle '*', '<ms>-*', or explicit)
-//   let ms, seq;
-
-//   // Fully auto
-//   if (id === '*') {
-//     ms = Date.now();
-//     seq = 0;
-//     const streamData = store.get(streamKey);
-//     if (streamData && streamData.type === 'stream' && streamData.entries.length > 0) {
-//       const last = streamData.entries[streamData.entries.length - 1];
-//       const [lastMs, lastSeq] = last.id.split('-').map(Number);
-//       if (lastMs === ms) {
-//         seq = lastSeq + 1;
-//       }
-//     }
-//     id = `${ms}-${seq}`;
-//   }
-//   // Partially auto
-//   else if (/^\d+-\*$/.test(id)) {
-//     ms = Number(id.split('-')[0]);
-//     const streamData = store.get(streamKey);
-//     if (!streamData || streamData.entries.length === 0) {
-//       seq = ms === 0 ? 1 : 0;
-//     } else {
-//       let maxSeq = -1;
-//       for (let i = streamData.entries.length - 1; i >= 0; i--) {
-//         const [entryMs, entrySeq] = streamData.entries[i].id
-//           .split('-')
-//           .map(Number);
-//         if (entryMs === ms) {
-//           maxSeq = Math.max(maxSeq, entrySeq);
-//         }
-//         if (entryMs < ms) break; // stop searching
-//       }
-//       seq = maxSeq >= 0 ? maxSeq + 1 : ms === 0 ? 1 : 0;
-//     }
-//     id = `${ms}-${seq}`;
-//   } else {
-//     // Explicit
-//     const parts = id.split('-');
-//     ms = Number(parts[0]);
-//     seq = Number(parts[1]);
-//   }
-
-//   // Validate id
-//   if (!/^\d+-\d+$/.test(id) || ms < 0 || seq < 0) {
-//     return encodeSimpleString('ERR The ID specified in XADD must be greater than 0-0');
-//   }
-//   if (ms === 0 && seq === 0) {
-//     return encodeSimpleString('ERR The ID specified in XADD must be greater than 0-0');
-//   }
-//   if (ms === 0 && seq < 1) {
-//     return encodeSimpleString('ERR The ID specified in XADD must be greater than 0-0');
-//   }
-
-//   // Prepare field-value pairs
-//   const pairs = {};
-//   for (let i = 3; i + 1 < cmdArr.length; i += 2) {
-//     pairs[cmdArr[i]] = cmdArr[i + 1];
-//   }
-
-//   // Stream creation if needed
-//   if (!store.get(streamKey)) {
-//     store.set(streamKey, { entries: [] }, null, 'stream');
-//   }
-
-//   // Get the stream
-//   const streamData = store.get(streamKey);
-  
-//   // Strictly greater than last entry check!
-//   const entries = streamData.entries;
-//   if (entries.length > 0) {
-//     const last = entries[entries.length - 1];
-//     const [lastMs, lastSeq] = last.id.split('-').map(Number);
-//     if (ms < lastMs || (ms === lastMs && seq <= lastSeq)) {
-//       return encodeSimpleString('ERR The ID specified in XADD is equal or smaller than the target stream top item');
-//     }
-//   }
-
-//   // Add entry
-//   const entry = { id, ...pairs };
-//   streamData.entries.push(entry);
-  
-//   // Handle XREAD BLOCK
-//   fulfillPendingXReads(streamKey, entry);
-  
-//   return encodeBulkString(id);
-// }
-
-function handleXadd(conn, cmdArr) {
-  const streams = {};
-  const key = cmdArr[1];
+function handleXadd(connection, cmdArr) {
+  const streamKey = cmdArr[1];
   let id = cmdArr[2];
-  const fields = cmdArr.slice(3);
-
-  if (!streams[key]) {
-    streams[key] = [];
-  }
-
-  // Auto-generate ID if ID is '*'
+  
+  // Parse XADD id (handle '*', '<ms>-*', or explicit)
+  let ms, seq;
+  
+  // Fully auto
   if (id === '*') {
-    const now = Date.now(); // current time in ms
-    id = `${now}-0`;
-    // You could enhance this later to handle multiple adds in same ms by incrementing sequence number
+    ms = Date.now();
+    seq = 0;
+    const streamData = store.get(streamKey);
+    if (streamData && streamData.type === 'stream' && streamData.entries.length > 0) {
+      const last = streamData.entries[streamData.entries.length - 1];
+      const [lastMs, lastSeq] = last.id.split('-').map(Number);
+      if (lastMs === ms) {
+        seq = lastSeq + 1;
+      }
+    }
+    id = `${ms}-${seq}`;
   }
-
-  // Parse fields into object
-  const entry = { id };
-  for (let i = 0; i < fields.length; i += 2) {
-    entry[fields[i]] = fields[i + 1];
+  // Partially auto
+  else if (/^\d+-\*$/.test(id)) {
+    ms = Number(id.split('-')[0]);
+    const streamData = store.get(streamKey);
+    if (!streamData || streamData.entries.length === 0) {
+      seq = ms === 0 ? 1 : 0;
+    } else {
+      let maxSeq = -1;
+      for (let i = streamData.entries.length - 1; i >= 0; i--) {
+        const [entryMs, entrySeq] = streamData.entries[i].id
+          .split('-')
+          .map(Number);
+        if (entryMs === ms) {
+          maxSeq = Math.max(maxSeq, entrySeq);
+        }
+        if (entryMs < ms) break; // stop searching
+      }
+      seq = maxSeq >= 0 ? maxSeq + 1 : ms === 0 ? 1 : 0;
+    }
+    id = `${ms}-${seq}`;
+  } else {
+    // Explicit
+    const parts = id.split('-');
+    ms = Number(parts[0]);
+    seq = Number(parts[1]);
   }
-
-  // Add to stream
-  streams[key].push(entry);
-
-  // Respond with the ID (as a RESP bulk string)
-  const resp = `$${id.length}\r\n${id}\r\n`;
-  conn.write(resp);
-
-  // Notify pending XREADs
-  maybeFulfillBlockedXREADs(key, entry);
+  
+  // Validate id
+  if (!/^\d+-\d+$/.test(id) || ms < 0 || seq < 0) {
+    return encodeSimpleString('ERR The ID specified in XADD must be greater than 0-0');
+  }
+  if (ms === 0 && seq === 0) {
+    return encodeSimpleString('ERR The ID specified in XADD must be greater than 0-0');
+  }
+  if (ms === 0 && seq < 1) {
+    return encodeSimpleString('ERR The ID specified in XADD must be greater than 0-0');
+  }
+  
+  // Prepare field-value pairs
+  const pairs = {};
+  for (let i = 3; i + 1 < cmdArr.length; i += 2) {
+    pairs[cmdArr[i]] = cmdArr[i + 1];
+  }
+  
+  // Stream creation if needed
+  if (!store.get(streamKey)) {
+    store.set(streamKey, { entries: [] }, null, 'stream');
+  }
+  
+  // Get the stream
+  const streamData = store.get(streamKey);
+ 
+  // Strictly greater than last entry check!
+  const entries = streamData.entries;
+  if (entries.length > 0) {
+    const last = entries[entries.length - 1];
+    const [lastMs, lastSeq] = last.id.split('-').map(Number);
+    if (ms < lastMs || (ms === lastMs && seq <= lastSeq)) {
+      return encodeSimpleString('ERR The ID specified in XADD is equal or smaller than the target stream top item');
+    }
+  }
+  
+  // Add entry
+  const entry = { id, ...pairs };
+  streamData.entries.push(entry);
+ 
+  // Handle XREAD BLOCK
+  fulfillPendingXReads(streamKey, entry);
+ 
+  return encodeBulkString(id);
 }
 
 /**
