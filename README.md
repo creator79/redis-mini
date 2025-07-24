@@ -1,5 +1,61 @@
 [![progress-banner](https://backend.codecrafters.io/progress/redis/be2458d2-b7ff-460a-a1f9-533375a55eb1)]
 
+# Redis Server Implementation
+
+This is a modular implementation of a Redis server in JavaScript. The codebase has been organized into a clean, maintainable structure based on Redis features and functionality.
+
+## Modular Architecture
+
+The codebase is organized into the following modules:
+
+```
+app/
+├── config/
+│   ├── constants.js       # Centralized constants and enums
+│   └── config-parser.js   # Command-line argument parsing
+├── protocol/
+│   └── resp.js            # Redis Serialization Protocol implementation
+├── storage/
+│   ├── store.js           # In-memory key-value store
+│   └── rdb-loader.js      # RDB file loading and parsing
+├── replication/
+│   ├── replica-manager.js # Replica management and WAIT command
+│   └── replica-handshake.js # Replica handshake process
+├── commands/
+│   └── command-handler.js # Command dispatching and handling
+├── server.js              # Server setup and connection handling
+└── main.js                # Entry point
+```
+
+For more details about the architecture, see [ModularArchitecture.md](./Notes/ModularArchitecture.md) in the Notes folder.
+
+## Running the Server
+
+```bash
+# Install dependencies
+npm install
+
+# Run as master
+npm start
+
+# Run as replica
+npm start -- --replicaof "127.0.0.1 6379"
+
+# Run with custom port
+npm start -- --port 6380
+
+# Run with custom RDB file location
+npm start -- --dir ./data --dbfilename custom.rdb
+```
+
+You can interact with the server using the Redis CLI:
+
+```bash
+redis-cli -p 6379 PING
+redis-cli -p 6379 SET mykey "Hello World"
+redis-cli -p 6379 GET mykey
+```
+
 ## Next Steps 📚
 
 **Want to make it better? Try adding these features (in order of difficulty):**
