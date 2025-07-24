@@ -401,7 +401,7 @@ function generateStreamId(userIdPart, streams, streamKey) {
     const ms = parseInt(msPart, 10);
     
     // Find the highest sequence number for this ms timestamp
-    let maxSeq = 0; // Start from 0, so first entry will be 1
+    let maxSeq = -1; // Start from -1, so if no entries exist, first will be 0
     if (streams[streamKey]) {
       for (const entry of streams[streamKey]) {
         const [entryMs, entrySeq] = entry.id.split("-").map(Number);
@@ -409,6 +409,12 @@ function generateStreamId(userIdPart, streams, streamKey) {
           maxSeq = Math.max(maxSeq, entrySeq);
         }
       }
+    }
+    
+    // Special case: if timestamp is 0 and no entries exist, start from sequence 1
+    // because 0-0 is an invalid/reserved ID in Redis
+    if (ms === 0 && maxSeq === -1) {
+      return `${ms}-1`;
     }
     
     return `${ms}-${maxSeq + 1}`;
