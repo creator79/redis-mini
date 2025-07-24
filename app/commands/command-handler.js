@@ -198,6 +198,7 @@ function handleIncr(connection, cmdArr) {
 // }
 
 function handleXadd(conn, cmdArr) {
+  const streams = {};
   const key = cmdArr[1];
   let id = cmdArr[2];
   const fields = cmdArr.slice(3);
