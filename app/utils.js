@@ -3,7 +3,7 @@ const HEADER = '5245444953';  // "REDIS"
 const HASH_TABLE_START = 'fb';
 const EOF = 'ff';
 const MILLISECONDS_EXPIRY = 'fc';
-const SECONDS_EXPIRY = 'fd';
+const SECONDS_EXPIRY = 'fd'; 
 
 /**
  * Convert hex string to ASCII.
