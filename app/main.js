@@ -602,63 +602,51 @@ server = net.createServer((connection) => {
     }
 
     // XADD command
-    if (command === "xadd") {
-      const streamKey = cmdArr[1];
-      const userIdPart = cmdArr[2];
-      
-      // Generate or validate the entry ID
-      let entryId;
-      if (userIdPart === "*" || userIdPart.includes("-*")) {
-        entryId = generateStreamId(userIdPart, streams, streamKey);
-      } else {
-        entryId = userIdPart;
-        
-        // Special case: check for 0-0 which is always invalid
-        if (entryId === "0-0") {
-          connection.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
-          return;
-        }
-        
-        if (!isValidStreamId(entryId, streams, streamKey)) {
-          connection.write("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n");
-          return;
-        }
-      }
+   if (command === "xadd") {
+  const streamKey = cmdArr[1];
+  const userIdPart = cmdArr[2];
 
-      // Initialize stream if it doesn't exist
-      if (!streams[streamKey]) {
-        streams[streamKey] = [];
-      }
+  // Generate or validate the entry ID
+  let entryId;
+  if (userIdPart === "*" || userIdPart.includes("-*")) {
+    entryId = generateStreamId(userIdPart, streams, streamKey);
+  } else {
+    entryId = userIdPart;
 
-      // Create the entry with field-value pairs
-      const entry = { id: entryId };
-      for (let i = 3; i < cmdArr.length; i += 2) {
-        if (i + 1 < cmdArr.length) {
-          entry[cmdArr[i]] = cmdArr[i + 1];
-        }
-      }
-
-      // Add to stream
-      streams[streamKey].push(entry);
-
-      // Send the generated ID back to client
-      connection.write(`$${entryId.length}\r\n${entryId}\r\n`);
-
-      // Check for blocked XREAD clients
-      maybeFulfillBlockedXREADs(streamKey, entry);
-
-      // Propagate to replicas if this is a master and not from a replica
-      if (!connection.isReplica && replicaSockets.length > 0) {
-        const respCmd = encodeRespArray(cmdArr);
-        masterOffset += Buffer.byteLength(respCmd, "utf8");
-        replicaSockets.forEach((sock) => {
-          if (sock.writable) {
-            sock.write(respCmd);
-          }
-        });
-      }
+    // Check for 0-0 which is always invalid
+    if (entryId === "0-0") {
+      connection.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
       return;
     }
+
+    if (!isValidStreamId(entryId, streams, streamKey)) {
+      connection.write("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n");
+      return;
+    }
+  }
+
+  // Prepare entry fields
+  const fields = [];
+  for (let i = 3; i < cmdArr.length; i += 2) {
+    const key = cmdArr[i];
+    const value = cmdArr[i + 1];
+    fields.push([key, value]);
+  }
+
+  // Create stream and db entry if missing
+  if (!streams[streamKey]) {
+    streams[streamKey] = [];
+    db[streamKey] = { type: "stream" }; // ✅ Mark it as stream
+  }
+
+  // Add entry
+  streams[streamKey].push({ id: entryId, fields });
+
+  // Reply with the generated ID
+  connection.write(`$${entryId.length}\r\n${entryId}\r\n`);
+  return;
+}
+
 
     // XRANGE command
     if (command === "xrange") {
