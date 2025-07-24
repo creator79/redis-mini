@@ -45,6 +45,10 @@ This implementation uses a functional approach rather than a class-based approac
 
 The `REPLCONF GETACK` command is handled in the `replication.js` file. When a master sends this command, the replica responds with `REPLCONF ACK 0` to acknowledge the command.
 
+The implementation handles REPLCONF GETACK in two ways:
+
+1. During normal command processing:
+
 ```javascript
 // Handle REPLCONF GETACK command
 if (command === 'REPLCONF' && args[0].toUpperCase() === 'GETACK') {
@@ -54,4 +58,14 @@ if (command === 'REPLCONF' && args[0].toUpperCase() === 'GETACK') {
 }
 ```
 
-This implementation is simple and straightforward, making it easy to understand how the replica responds to the master's commands.
+2. During RDB transfer (a critical phase where the master sends binary data):
+
+```javascript
+// Check for REPLCONF GETACK in the buffer, even during RDB transfer
+const getAckResult = checkForGetAckCommand(buffer, client);
+buffer = getAckResult.buffer;
+```
+
+The `checkForGetAckCommand` function scans the incoming data buffer for REPLCONF GETACK commands, even when they're embedded within binary RDB data. When found, it responds immediately and removes the command from the buffer to prevent it from interfering with RDB processing.
+
+This robust implementation ensures that the replica can properly respond to REPLCONF GETACK commands at any point during the replication process, including during the critical RDB transfer phase.
