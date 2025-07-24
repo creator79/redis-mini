@@ -103,6 +103,12 @@ function handleIncr(connection, cmdArr) {
  * @param {string[]} cmdArr - Command array
  * @returns {string} RESP response
  */
+/**
+ * Handle the XADD command
+ * @param {net.Socket} connection - Client connection
+ * @param {string[]} cmdArr - Command array
+ * @returns {string} RESP response
+ */
 function handleXadd(connection, cmdArr) {
   const streamKey = cmdArr[1];
   let id = cmdArr[2];
@@ -169,12 +175,11 @@ function handleXadd(connection, cmdArr) {
   }
   
   // Stream creation if needed
-  if (!store.get(streamKey)) {
-    store.set(streamKey, { entries: [] }, null, 'stream');
+  let streamData = store.get(streamKey);
+  if (!streamData || !streamData.entries) {
+    streamData = { entries: [], type: 'stream' };
+    store.set(streamKey, streamData, null, 'stream');
   }
-  
-  // Get the stream
-  const streamData = store.get(streamKey);
  
   // Strictly greater than last entry check!
   const entries = streamData.entries;
