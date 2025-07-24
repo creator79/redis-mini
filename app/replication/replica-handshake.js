@@ -220,6 +220,9 @@ class ReplicaHandshake {
    * Process RDB data received from master
    */
   processRDB() {
+    // Check for and handle any RESP commands in the buffer
+    this.checkForCommandsInBuffer();
+    
     // If we haven't yet parsed the header, do that first
     if (!this.rdbExpectedLength) {
       if (!this.buffer.startsWith('$')) {
@@ -244,6 +247,9 @@ class ReplicaHandshake {
       this.rdbExpectedLength = parsedLength;
       console.log(`Parsed RDB expected length: ${this.rdbExpectedLength}`);
       this.buffer = this.buffer.slice(crlfIndex + 2);
+      
+      // Check again for commands after parsing the header
+      this.checkForCommandsInBuffer();
     }
 
     // Now we know how many bytes of raw payload to expect
@@ -261,6 +267,102 @@ class ReplicaHandshake {
     this.rdbProcessed = true;
     this.currentStage = HANDSHAKE_STAGES.COMPLETED;
     console.log('RDB transfer complete. Switching to replication command mode.');
+    
+    // Check for commands one more time after RDB processing
+    this.checkForCommandsInBuffer();
+  }
+  
+  /**
+   * Check for and handle any RESP commands in the buffer
+   */
+  checkForCommandsInBuffer() {
+    // Look for RESP array markers
+    let startIndex = this.buffer.indexOf('*');
+    while (startIndex !== -1) {
+      // Try to parse a complete command
+      try {
+        // Extract a potential command
+        const endIndex = this.buffer.indexOf('\r\n', startIndex);
+        if (endIndex === -1) break;
+        
+        const countStr = this.buffer.substring(startIndex + 1, endIndex);
+        const count = parseInt(countStr, 10);
+        if (isNaN(count) || count <= 0) {
+          startIndex = this.buffer.indexOf('*', startIndex + 1);
+          continue;
+        }
+        
+        // Check if we have enough data to parse the full command
+        let currentPos = endIndex + 2; // Skip *N\r\n
+        const args = [];
+        let commandComplete = true;
+        
+        for (let i = 0; i < count; i++) {
+          // Check for bulk string marker
+          if (currentPos >= this.buffer.length || this.buffer[currentPos] !== '$') {
+            commandComplete = false;
+            break;
+          }
+          
+          // Parse string length
+          const lenEndIndex = this.buffer.indexOf('\r\n', currentPos);
+          if (lenEndIndex === -1) {
+            commandComplete = false;
+            break;
+          }
+          
+          const lenStr = this.buffer.substring(currentPos + 1, lenEndIndex);
+          const len = parseInt(lenStr, 10);
+          if (isNaN(len) || len < 0) {
+            commandComplete = false;
+            break;
+          }
+          
+          currentPos = lenEndIndex + 2; // Skip $N\r\n
+          // Check if we have the full string
+          if (currentPos + len + 2 > this.buffer.length) {
+            commandComplete = false;
+            break;
+          }
+          
+          // Extract the argument
+          const arg = this.buffer.substring(currentPos, currentPos + len);
+          args.push(arg);
+          
+          currentPos += len + 2; // Skip string content and \r\n
+        }
+        
+        if (!commandComplete) {
+          // Command is incomplete, try next * marker
+          startIndex = this.buffer.indexOf('*', startIndex + 1);
+          continue;
+        }
+        
+        // We have a complete command
+        console.log(`Extracted command from buffer:`, args);
+        
+        // Check if this is a REPLCONF GETACK command
+        if (args.length === 3 && 
+            args[0].toUpperCase() === 'REPLCONF' && 
+            args[1].toUpperCase() === 'GETACK') {
+          
+          console.log(`Responding to REPLCONF GETACK with offset 0`);
+          const response = serialize.array(['REPLCONF', 'ACK', '0']);
+          this.connection.write(response);
+        }
+        
+        // Remove the command from the buffer
+        this.buffer = this.buffer.substring(0, startIndex) + 
+                     this.buffer.substring(currentPos);
+        
+        // Look for more commands
+        startIndex = this.buffer.indexOf('*');
+      } catch (err) {
+        console.error('Error parsing command in buffer:', err.message);
+        // Move to next * marker
+        startIndex = this.buffer.indexOf('*', startIndex + 1);
+      }
+    }
   }
 
   /**
