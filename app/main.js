@@ -426,11 +426,9 @@ function generateStreamId(userIdPart, streams, streamKey) {
 
 // Helper: validate stream entry ID
 function isValidStreamId(id, streams, streamKey) {
-  if (id === "0-0") return false;
-  
+  // Note: 0-0 case is handled separately in XADD command
   const [ms, seq] = id.split("-").map(Number);
   if (ms < 0 || seq < 0) return false;
-  if (ms === 0 && seq === 0) return false;
   
   // Check if ID is greater than all existing IDs
   if (streams[streamKey]) {
@@ -614,6 +612,13 @@ server = net.createServer((connection) => {
         entryId = generateStreamId(userIdPart, streams, streamKey);
       } else {
         entryId = userIdPart;
+        
+        // Special case: check for 0-0 which is always invalid
+        if (entryId === "0-0") {
+          connection.write("-ERR The ID specified in XADD must be greater than 0-0\r\n");
+          return;
+        }
+        
         if (!isValidStreamId(entryId, streams, streamKey)) {
           connection.write("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n");
           return;
