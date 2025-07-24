@@ -34,11 +34,11 @@
 //   replicaHandshake.connectToMaster(config, server);
 // }
 
-
 const net = require("net");
 const fs = require("fs");
 const path = require("path");
 const db = {};
+const streams = {}; // For XADD/XRANGE/XREAD
 const masterReplId = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
 const EMPTY_RDB = Buffer.from([
   0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31, 0xff, 0x00, 0x00, 0x00,
@@ -197,31 +197,18 @@ if (role === "slave" && masterHost && masterPort) {
     const command = cmdArr[0].toLowerCase();
 
     if (command === "set") {
-  const key = cmdArr[1];
-  const value = cmdArr[2];
+      const key = cmdArr[1];
+      const value = cmdArr[2];
 
-  let expiresAt = null;
-  if (cmdArr.length >= 5 && cmdArr[3] && cmdArr[3].toLowerCase() === "px") {
-    const px = parseInt(cmdArr[4], 10);
-    expiresAt = Date.now() + px;
-  }
-
-  db[key] = { value, expiresAt, type: "string" };
-  // Always send reply!
-  connection.write("+OK\r\n");
-
-  // (replication logic unchanged)
-  if (!connection.isReplica && replicaSockets.length > 0) {
-    const respCmd = encodeRespArray(cmdArr);
-    masterOffset += Buffer.byteLength(respCmd, "utf8");
-    replicaSockets.forEach((sock) => {
-      if (sock.writable) {
-        sock.write(respCmd);
+      let expiresAt = null;
+      if (cmdArr.length >= 5 && cmdArr[3] && cmdArr[3].toLowerCase() === "px") {
+        const px = parseInt(cmdArr[4], 10);
+        expiresAt = Date.now() + px;
       }
-    });
+
+      db[key] = { value, expiresAt, type: "string" };
+    }
   }
-}
-}
 
   // Minimal RESP parser for a single array from Buffer, returns [arr, bytesRead]
   function tryParseRESP(buf) {
@@ -372,7 +359,7 @@ console.log("Logs from your program will appear here!");
 // Helper: is a command a write command?
 function isWriteCommand(cmd) {
   // Add more if needed (DEL, etc.)
-  return ["set", "del"].includes(cmd);
+  return ["set", "del", "xadd"].includes(cmd);
 }
 
 // Helper: encode RESP array from array of strings
@@ -401,8 +388,58 @@ function encodeRespInteger(n) {
   return `:${n}\r\n`;
 }
 
+// Helper: generate stream entry ID
+function generateStreamId(userIdPart, streams, streamKey) {
+  if (userIdPart === "*") {
+    // Auto-generate full ID
+    return `${Date.now()}-0`;
+  }
+  
+  if (userIdPart.endsWith("-*")) {
+    // User provided ms part, auto-generate sequence
+    const msPart = userIdPart.slice(0, -2);
+    const ms = parseInt(msPart, 10);
+    
+    // Find the highest sequence number for this ms timestamp
+    let maxSeq = -1;
+    if (streams[streamKey]) {
+      for (const entry of streams[streamKey]) {
+        const [entryMs, entrySeq] = entry.id.split("-").map(Number);
+        if (entryMs === ms) {
+          maxSeq = Math.max(maxSeq, entrySeq);
+        }
+      }
+    }
+    
+    return `${ms}-${maxSeq + 1}`;
+  }
+  
+  // User provided full ID, use as-is
+  return userIdPart;
+}
+
+// Helper: validate stream entry ID
+function isValidStreamId(id, streams, streamKey) {
+  if (id === "0-0") return false;
+  
+  const [ms, seq] = id.split("-").map(Number);
+  if (ms < 0 || seq < 0) return false;
+  if (ms === 0 && seq === 0) return false;
+  
+  // Check if ID is greater than all existing IDs
+  if (streams[streamKey]) {
+    for (const entry of streams[streamKey]) {
+      const [existingMs, existingSeq] = entry.id.split("-").map(Number);
+      if (ms < existingMs || (ms === existingMs && seq <= existingSeq)) {
+        return false;
+      }
+    }
+  }
+  
+  return true;
+}
+
 // ==== MAIN SERVER STARTS HERE ====
-// Uncomment this block to pass the first stage
 server = net.createServer((connection) => {
   // ==== CHANGES FOR REPLICATION START ====
   connection.isReplica = false; // Mark whether this socket is a replica
@@ -471,23 +508,396 @@ server = net.createServer((connection) => {
     }
     // ==== CHANGES FOR REPLICATION END ====
 
-    // ... (the rest of your command handlers, unchanged)
-    // (set, get, incr, xadd, xrange, xread, type, config, keys, info, wait)
-    // -- OMITTED HERE FOR SPACE, but they are unchanged and as in your original
+    // PING command
+    if (command === "ping") {
+      connection.write("+PONG\r\n");
+      return;
+    }
 
-    // Copy your other handlers (set/get/etc) here
-    // (just like in your latest code)
-    // ... etc ...
-    // --- (handlers as in your code) ---
+    // ECHO command
+    if (command === "echo") {
+      const message = cmdArr[1] || "";
+      connection.write(`$${message.length}\r\n${message}\r\n`);
+      return;
+    }
 
-    // (see previous code blocks for the full set of handlers)
-    // ... all your remaining handlers unchanged ...
-    // ... including handleWAITCommand and resolveWAITs ...
+    // SET command
+    if (command === "set") {
+      const key = cmdArr[1];
+      const value = cmdArr[2];
+
+      let expiresAt = null;
+      if (cmdArr.length >= 5 && cmdArr[3] && cmdArr[3].toLowerCase() === "px") {
+        const px = parseInt(cmdArr[4], 10);
+        expiresAt = Date.now() + px;
+      }
+
+      db[key] = { value, expiresAt, type: "string" };
+      connection.write("+OK\r\n");
+
+      // Propagate to replicas if this is a master and not from a replica
+      if (!connection.isReplica && replicaSockets.length > 0) {
+        const respCmd = encodeRespArray(cmdArr);
+        masterOffset += Buffer.byteLength(respCmd, "utf8");
+        replicaSockets.forEach((sock) => {
+          if (sock.writable) {
+            sock.write(respCmd);
+          }
+        });
+      }
+      return;
+    }
+
+    // GET command
+    if (command === "get") {
+      const key = cmdArr[1];
+      const entry = db[key];
+
+      if (!entry) {
+        connection.write("$-1\r\n"); // null
+        return;
+      }
+
+      // Check expiry
+      if (entry.expiresAt && Date.now() > entry.expiresAt) {
+        delete db[key];
+        connection.write("$-1\r\n"); // null
+        return;
+      }
+
+      const value = entry.value;
+      connection.write(`$${value.length}\r\n${value}\r\n`);
+      return;
+    }
+
+    // INCR command
+    if (command === "incr") {
+      const key = cmdArr[1];
+      let entry = db[key];
+
+      // Check if key exists and hasn't expired
+      if (entry && entry.expiresAt && Date.now() > entry.expiresAt) {
+        delete db[key];
+        entry = null;
+      }
+
+      let currentValue = 0;
+      if (entry) {
+        const parsed = parseInt(entry.value, 10);
+        if (isNaN(parsed)) {
+          connection.write("-ERR value is not an integer or out of range\r\n");
+          return;
+        }
+        currentValue = parsed;
+      }
+
+      const newValue = currentValue + 1;
+      db[key] = { value: newValue.toString(), expiresAt: null, type: "string" };
+      connection.write(`:${newValue}\r\n`);
+      return;
+    }
+
+    // XADD command
+    if (command === "xadd") {
+      const streamKey = cmdArr[1];
+      const userIdPart = cmdArr[2];
+      
+      // Generate or validate the entry ID
+      let entryId;
+      if (userIdPart === "*" || userIdPart.includes("-*")) {
+        entryId = generateStreamId(userIdPart, streams, streamKey);
+      } else {
+        entryId = userIdPart;
+        if (!isValidStreamId(entryId, streams, streamKey)) {
+          connection.write("-ERR The ID specified in XADD is equal or smaller than the target stream top item\r\n");
+          return;
+        }
+      }
+
+      // Initialize stream if it doesn't exist
+      if (!streams[streamKey]) {
+        streams[streamKey] = [];
+      }
+
+      // Create the entry with field-value pairs
+      const entry = { id: entryId };
+      for (let i = 3; i < cmdArr.length; i += 2) {
+        if (i + 1 < cmdArr.length) {
+          entry[cmdArr[i]] = cmdArr[i + 1];
+        }
+      }
+
+      // Add to stream
+      streams[streamKey].push(entry);
+
+      // Send the generated ID back to client
+      connection.write(`$${entryId.length}\r\n${entryId}\r\n`);
+
+      // Check for blocked XREAD clients
+      maybeFulfillBlockedXREADs(streamKey, entry);
+
+      // Propagate to replicas if this is a master and not from a replica
+      if (!connection.isReplica && replicaSockets.length > 0) {
+        const respCmd = encodeRespArray(cmdArr);
+        masterOffset += Buffer.byteLength(respCmd, "utf8");
+        replicaSockets.forEach((sock) => {
+          if (sock.writable) {
+            sock.write(respCmd);
+          }
+        });
+      }
+      return;
+    }
+
+    // XRANGE command
+    if (command === "xrange") {
+      const streamKey = cmdArr[1];
+      const start = cmdArr[2];
+      const end = cmdArr[3];
+
+      if (!streams[streamKey]) {
+        connection.write("*0\r\n"); // empty array
+        return;
+      }
+
+      const entries = streams[streamKey];
+      const result = [];
+
+      for (const entry of entries) {
+        const [entryMs, entrySeq] = entry.id.split("-").map(Number);
+        
+        // Check start condition
+        if (start !== "-") {
+          const [startMs, startSeq] = start.split("-").map(Number);
+          if (entryMs < startMs || (entryMs === startMs && entrySeq < startSeq)) {
+            continue;
+          }
+        }
+
+        // Check end condition
+        if (end !== "+") {
+          const [endMs, endSeq] = end.split("-").map(Number);
+          if (entryMs > endMs || (entryMs === endMs && entrySeq > endSeq)) {
+            continue;
+          }
+        }
+
+        // Build field-value array
+        const fields = [];
+        for (const [key, value] of Object.entries(entry)) {
+          if (key !== "id") {
+            fields.push(key, value);
+          }
+        }
+
+        result.push([entry.id, fields]);
+      }
+
+      connection.write(encodeRespArrayDeep(result));
+      return;
+    }
+
+    // XREAD command
+    if (command === "xread") {
+      let blockTimeout = null;
+      let argIndex = 1;
+
+      // Check for BLOCK option
+      if (cmdArr[argIndex] && cmdArr[argIndex].toLowerCase() === "block") {
+        blockTimeout = parseInt(cmdArr[argIndex + 1], 10);
+        argIndex += 2;
+      }
+
+      // Next should be "streams"
+      if (!cmdArr[argIndex] || cmdArr[argIndex].toLowerCase() !== "streams") {
+        connection.write("-ERR syntax error\r\n");
+        return;
+      }
+      argIndex++;
+
+      // Parse streams and IDs
+      const remainingArgs = cmdArr.slice(argIndex);
+      const numStreams = Math.floor(remainingArgs.length / 2);
+      const streamKeys = remainingArgs.slice(0, numStreams);
+      const streamIds = remainingArgs.slice(numStreams);
+
+      if (streamKeys.length !== streamIds.length) {
+        connection.write("-ERR syntax error\r\n");
+        return;
+      }
+
+      // Process each stream
+      const results = [];
+      let hasData = false;
+
+      for (let i = 0; i < streamKeys.length; i++) {
+        const streamKey = streamKeys[i];
+        let afterId = streamIds[i];
+
+        // Handle special case: $ means "current latest ID"
+        if (afterId === "$") {
+          if (streams[streamKey] && streams[streamKey].length > 0) {
+            afterId = streams[streamKey][streams[streamKey].length - 1].id;
+          } else {
+            afterId = "0-0"; // If stream doesn't exist, start from beginning
+          }
+        }
+
+        if (!streams[streamKey]) {
+          continue;
+        }
+
+        const streamEntries = [];
+        const [afterMs, afterSeq] = afterId.split("-").map(Number);
+
+        for (const entry of streams[streamKey]) {
+          const [entryMs, entrySeq] = entry.id.split("-").map(Number);
+          
+          // Only include entries that come after the specified ID
+          if (entryMs > afterMs || (entryMs === afterMs && entrySeq > afterSeq)) {
+            const fields = [];
+            for (const [key, value] of Object.entries(entry)) {
+              if (key !== "id") {
+                fields.push(key, value);
+              }
+            }
+            streamEntries.push([entry.id, fields]);
+          }
+        }
+
+        if (streamEntries.length > 0) {
+          results.push([streamKey, streamEntries]);
+          hasData = true;
+        }
+      }
+
+      // If we have data or not blocking, return immediately
+      if (hasData || blockTimeout === null) {
+        if (results.length === 0) {
+          connection.write("$-1\r\n"); // null
+        } else {
+          connection.write(encodeRespArrayDeep(results));
+        }
+        return;
+      }
+
+      // Block and wait for new data
+      if (blockTimeout === 0) {
+        // Block indefinitely
+        pendingXReads.push({
+          conn: connection,
+          streams: streamKeys,
+          ids: streamIds,
+          timer: null
+        });
+      } else {
+        // Block with timeout
+        const timer = setTimeout(() => {
+          connection.write("$-1\r\n"); // timeout, return null
+          pendingXReads = pendingXReads.filter(p => p.conn !== connection);
+        }, blockTimeout);
+
+        pendingXReads.push({
+          conn: connection,
+          streams: streamKeys,
+          ids: streamIds,
+          timer: timer
+        });
+      }
+      return;
+    }
+
+    // TYPE command
+    if (command === "type") {
+      const key = cmdArr[1];
+      const entry = db[key];
+
+      if (!entry) {
+        connection.write("+none\r\n");
+        return;
+      }
+
+      // Check expiry
+      if (entry.expiresAt && Date.now() > entry.expiresAt) {
+        delete db[key];
+        connection.write("+none\r\n");
+        return;
+      }
+
+      const type = entry.type || "string";
+      connection.write(`+${type}\r\n`);
+      return;
+    }
+
+    // CONFIG GET command
+    if (command === "config" && cmdArr[1] && cmdArr[1].toLowerCase() === "get") {
+      const param = cmdArr[2];
+      if (param === "dir") {
+        connection.write(`*2\r\n$3\r\ndir\r\n$${dir.length}\r\n${dir}\r\n`);
+      } else if (param === "dbfilename") {
+        connection.write(`*2\r\n$10\r\ndbfilename\r\n$${dbfilename.length}\r\n${dbfilename}\r\n`);
+      } else {
+        connection.write("*0\r\n"); // empty array for unknown config
+      }
+      return;
+    }
+
+    // KEYS command
+    if (command === "keys") {
+      const pattern = cmdArr[1];
+      const keys = Object.keys(db).filter(key => {
+        const entry = db[key];
+        // Skip expired keys
+        if (entry.expiresAt && Date.now() > entry.expiresAt) {
+          delete db[key];
+          return false;
+        }
+        
+        if (pattern === "*") {
+          return true;
+        }
+        // Simple pattern matching - you can extend this for more complex patterns
+        return key.includes(pattern.replace("*", ""));
+      });
+
+      connection.write(`*${keys.length}\r\n`);
+      keys.forEach(key => {
+        connection.write(`${key.length}\r\n${key}\r\n`);
+      });
+      return;
+    }
+
+    // INFO command
+    if (command === "info") {
+      const section = cmdArr[1];
+      let info = "";
+
+      if (!section || section.toLowerCase() === "replication") {
+        info += `role:${role}\r\n`;
+        info += `master_replid:${masterReplId}\r\n`;
+        info += `master_repl_offset:${masterOffset}\r\n`;
+      }
+
+      connection.write(`${info.length}\r\n${info}\r\n`);
+      return;
+    }
+
+    // WAIT command
+    if (command === "wait") {
+      const numReplicas = parseInt(cmdArr[1], 10) || 0;
+      const timeout = parseInt(cmdArr[2], 10) || 0;
+      handleWAITCommand(connection, numReplicas, timeout);
+      return;
+    }
+
+    // Unknown command
+    connection.write("-ERR unknown command\r\n");
   });
 
   connection.on("error", (err) => {
     console.log("Socket error:", err.message);
   });
+  
   connection.on("close", () => {
     if (connection.isReplica) {
       replicaSockets = replicaSockets.filter((sock) => sock !== connection);
@@ -519,7 +929,6 @@ function parseRESP(buffer) {
 }
 
 // ====== WAIT logic below ======
-// (unchanged)
 function handleWAITCommand(clientConn, numReplicas, timeout) {
   const waitOffset = masterOffset;
   let resolved = false;
