@@ -1,35 +1,593 @@
-/**
- * Main entry point for the Redis server
- */
+// /**
+//  * Main entry point for the Redis server
+//  */
 
-const { parseConfig } = require('./config/config-parser');
-const { createServer } = require('./server');
-const { ROLES } = require('./config/constants');
-const { initRDBLoader } = require('./storage/rdb-loader');
-const replicaHandshake = require('./replication/replica-handshake');
+// const { parseConfig } = require('./config/config-parser');
+// const { createServer } = require('./server');
+// const { ROLES } = require('./config/constants');
+// const { initRDBLoader } = require('./storage/rdb-loader');
+// const replicaHandshake = require('./replication/replica-handshake');
 
-// Parse command line arguments
-const config = parseConfig(process.argv);
+// // Parse command line arguments
+// const config = parseConfig(process.argv);
 
-// Initialize the server based on role
-if (config.role === ROLES.MASTER) {
-  console.log('Starting server in MASTER mode');
+// // Initialize the server based on role
+// if (config.role === ROLES.MASTER) {
+//   console.log('Starting server in MASTER mode');
   
-  // Initialize RDB loader if needed
-  initRDBLoader(config);
+//   // Initialize RDB loader if needed
+//   initRDBLoader(config);
   
-  // Create and start the server
-  createServer(config);
-} else if (config.role === ROLES.REPLICA) {
-  console.log('Starting server in REPLICA mode');
-  console.log(`Connecting to master at ${config.masterHost}:${config.masterPort}`);
+//   // Create and start the server
+//   createServer(config);
+// } else if (config.role === ROLES.REPLICA) {
+//   console.log('Starting server in REPLICA mode');
+//   console.log(`Connecting to master at ${config.masterHost}:${config.masterPort}`);
   
-  // Initialize RDB loader if needed
-  initRDBLoader(config);
+//   // Initialize RDB loader if needed
+//   initRDBLoader(config);
   
-  // Create and start the server
-  const server = createServer(config);
+//   // Create and start the server
+//   const server = createServer(config);
   
-  // Connect to master and start replica handshake
-  replicaHandshake.connectToMaster(config, server);
+//   // Connect to master and start replica handshake
+//   replicaHandshake.connectToMaster(config, server);
+// }
+
+
+const net = require("net");
+const fs = require("fs");
+const path = require("path");
+const db = {};
+const masterReplId = "8371b4fb1155b71f4a04d3e1bc3e18c4a990aeeb";
+const EMPTY_RDB = Buffer.from([
+  0x52, 0x45, 0x44, 0x49, 0x53, 0x30, 0x30, 0x31, 0x31, 0xff, 0x00, 0x00, 0x00,
+  0x00, 0x00, 0x00, 0x00, 0x00,
+]);
+
+let masterOffset = 0; // Total number of bytes of write commands propagated
+let replicaSockets = []; // Store each replica connection with metadata
+let pendingWAITs = []; // Pending WAIT commands (from clients)
+let pendingXReads = []; // Pending XREAD BLOCK requests
+
+// Get CLI args
+let dir = "";
+let dbfilename = "";
+let port = 6379; // <-- default port
+let role = "master";
+let masterHost = null;
+let masterPort = null;
+
+const args = process.argv;
+for (let i = 0; i < args.length; i++) {
+  if (args[i] === "--dir" && i + 1 < args.length) {
+    dir = args[i + 1];
+  }
+  if (args[i] === "--dbfilename" && i + 1 < args.length) {
+    dbfilename = args[i + 1];
+  }
+  if (args[i] === "--port" && i + 1 < args.length) {
+    // <-- support --port
+    port = parseInt(args[i + 1], 10);
+  }
+  if (args[i] === "--replicaof" && i + 1 < args.length) {
+    role = "slave";
+    const [host, portStr] = args[i + 1].split(" ");
+    masterHost = host;
+    masterPort = parseInt(portStr, 10);
+  }
+}
+
+// ==== REPLICA MODE: receive and apply commands from master ====
+if (role === "slave" && masterHost && masterPort) {
+  const masterConnection = net.createConnection(masterPort, masterHost, () => {
+    masterConnection.write("*1\r\n$4\r\nPING\r\n");
+  });
+
+  let handshakeStep = 0;
+  let awaitingRDB = false;
+  let rdbBytesExpected = 0;
+  let leftover = Buffer.alloc(0); // Buffer for command data
+
+  masterConnection.on("data", (data) => {
+    if (handshakeStep === 0) {
+      const portStr = port.toString();
+      masterConnection.write(
+        `*3\r\n$8\r\nREPLCONF\r\n$14\r\nlistening-port\r\n$${portStr.length}\r\n${portStr}\r\n`
+      );
+      handshakeStep++;
+      return;
+    } else if (handshakeStep === 1) {
+      masterConnection.write(
+        "*3\r\n$8\r\nREPLCONF\r\n$4\r\ncapa\r\n$6\r\npsync2\r\n"
+      );
+      handshakeStep++;
+      return;
+    } else if (handshakeStep === 2) {
+      masterConnection.write("*3\r\n$5\r\nPSYNC\r\n$1\r\n?\r\n$2\r\n-1\r\n");
+      handshakeStep++;
+      return;
+    }
+
+    // After handshake: receive RDB, then handle all incoming commands
+    if (awaitingRDB) {
+      // Still reading RDB file
+      if (data.length >= rdbBytesExpected) {
+        const afterRDB = data.slice(rdbBytesExpected);
+        leftover = Buffer.concat([leftover, afterRDB]);
+        awaitingRDB = false;
+        processLeftover();
+      } else {
+        rdbBytesExpected -= data.length;
+        // Still need more data for RDB
+      }
+      return;
+    }
+
+    if (!awaitingRDB) {
+      const str = data.toString();
+      if (str.startsWith("+FULLRESYNC")) {
+        // Parse $<length>\r\n then RDB
+        const idx = str.indexOf("\r\n$");
+        if (idx !== -1) {
+          const rest = str.slice(idx + 3);
+          const match = rest.match(/^(\d+)\r\n/);
+          if (match) {
+            rdbBytesExpected = parseInt(match[1], 10);
+            awaitingRDB = true;
+            const rdbStart = idx + 3 + match[0].length;
+            const rdbAvailable = data.slice(rdbStart);
+            if (rdbAvailable.length >= rdbBytesExpected) {
+              // We have whole RDB, handle what's after
+              const afterRDB = rdbAvailable.slice(rdbBytesExpected);
+              leftover = Buffer.concat([leftover, afterRDB]);
+              awaitingRDB = false;
+              processLeftover();
+            } else {
+              // Wait for the rest
+              rdbBytesExpected -= rdbAvailable.length;
+            }
+            return;
+          }
+        }
+      } else {
+        // Already past RDB, this is propagated command data!
+        leftover = Buffer.concat([leftover, data]);
+        processLeftover();
+      }
+    }
+  });
+
+  masterConnection.on("error", (err) => {
+    console.log("Error connecting to master:", err.message);
+  });
+
+  function processLeftover() {
+    let offset = 0;
+    while (offset < leftover.length) {
+      const [arr, bytesRead] = tryParseRESP(leftover.slice(offset));
+      if (!arr || bytesRead === 0) break;
+
+      const command = arr[0] && arr[0].toLowerCase();
+
+      // Handle REPLCONF GETACK *
+      if (
+        command === "replconf" &&
+        arr[1] &&
+        arr[1].toLowerCase() === "getack"
+      ) {
+        // RESP Array: *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$<len>\r\n<offset>\r\n
+        const ackResp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${
+          masterOffset.toString().length
+        }\r\n${masterOffset}\r\n`;
+        masterConnection.write(ackResp);
+        masterOffset += bytesRead; // Only update offset after sending
+      } else {
+        masterOffset += bytesRead;
+        handleReplicaCommand(arr); // Handles SET, etc, silently
+      }
+
+      offset += bytesRead;
+    }
+    leftover = leftover.slice(offset);
+  }
+
+  function handleReplicaCommand(cmdArr) {
+    if (!cmdArr || !cmdArr[0]) return;
+    const command = cmdArr[0].toLowerCase();
+
+    if (command === "set") {
+  const key = cmdArr[1];
+  const value = cmdArr[2];
+
+  let expiresAt = null;
+  if (cmdArr.length >= 5 && cmdArr[3] && cmdArr[3].toLowerCase() === "px") {
+    const px = parseInt(cmdArr[4], 10);
+    expiresAt = Date.now() + px;
+  }
+
+  db[key] = { value, expiresAt, type: "string" };
+  // Always send reply!
+  connection.write("+OK\r\n");
+
+  // (replication logic unchanged)
+  if (!connection.isReplica && replicaSockets.length > 0) {
+    const respCmd = encodeRespArray(cmdArr);
+    masterOffset += Buffer.byteLength(respCmd, "utf8");
+    replicaSockets.forEach((sock) => {
+      if (sock.writable) {
+        sock.write(respCmd);
+      }
+    });
+  }
+}
+}
+
+  // Minimal RESP parser for a single array from Buffer, returns [arr, bytesRead]
+  function tryParseRESP(buf) {
+    if (buf[0] !== 42) return [null, 0]; // not '*'
+    const str = buf.toString();
+    const firstLineEnd = str.indexOf("\r\n");
+    if (firstLineEnd === -1) return [null, 0];
+    const numElems = parseInt(str.slice(1, firstLineEnd), 10);
+    let elems = [];
+    let cursor = firstLineEnd + 2;
+    for (let i = 0; i < numElems; i++) {
+      if (buf[cursor] !== 36) return [null, 0]; // not '$'
+      const lenLineEnd = buf.indexOf("\r\n", cursor);
+      if (lenLineEnd === -1) return [null, 0];
+      const len = parseInt(buf.slice(cursor + 1, lenLineEnd).toString(), 10);
+      const valStart = lenLineEnd + 2;
+      const valEnd = valStart + len;
+      if (valEnd + 2 > buf.length) return [null, 0]; // incomplete value
+      const val = buf.slice(valStart, valEnd).toString();
+      elems.push(val);
+      cursor = valEnd + 2;
+    }
+    return [elems, cursor];
+  }
+}
+// ==== END OF REPLICA MODE CHANGES ====
+
+// === RDB FILE LOADING START ===
+// Reads all key-value pairs (string type) from RDB, supports expiries
+function loadRDB(filepath) {
+  // Don't try to load if filepath is missing, doesn't exist, or is a directory!
+  if (
+    !filepath ||
+    !fs.existsSync(filepath) ||
+    !fs.statSync(filepath).isFile()
+  ) {
+    return;
+  }
+  const buffer = fs.readFileSync(filepath);
+  let offset = 0;
+
+  // Header: REDIS0011 (9 bytes)
+  offset += 9;
+
+  // Skip metadata sections (starts with 0xFA)
+  while (buffer[offset] === 0xfa) {
+    offset++; // skip FA
+    // name
+    let [name, nameLen] = readRDBString(buffer, offset);
+    offset += nameLen;
+    // value
+    let [val, valLen] = readRDBString(buffer, offset);
+    offset += valLen;
+  }
+
+  // Scan until 0xFE (start of database section)
+  while (offset < buffer.length && buffer[offset] !== 0xfe) {
+    offset++;
+  }
+
+  // DB section starts with 0xFE
+  if (buffer[offset] === 0xfe) {
+    offset++;
+    // db index (size encoded)
+    let [dbIndex, dbLen] = readRDBLength(buffer, offset);
+    offset += dbLen;
+    // Hash table size info: starts with FB
+    if (buffer[offset] === 0xfb) {
+      offset++;
+      // key-value hash table size
+      let [kvSize, kvSizeLen] = readRDBLength(buffer, offset);
+      offset += kvSizeLen;
+      // expiry hash table size (skip)
+      let [expSize, expLen] = readRDBLength(buffer, offset);
+      offset += expLen;
+
+      // Only handle string type and expiry
+      for (let i = 0; i < kvSize; ++i) {
+        let expiresAt = null;
+
+        // Handle optional expiry before type
+        if (buffer[offset] === 0xfc) {
+          // expiry in ms
+          offset++;
+          expiresAt = Number(buffer.readBigUInt64LE(offset));
+          offset += 8;
+        } else if (buffer[offset] === 0xfd) {
+          // expiry in s
+          offset++;
+          expiresAt = buffer.readUInt32LE(offset) * 1000;
+          offset += 4;
+        }
+
+        let type = buffer[offset++];
+        if (type !== 0) continue; // 0 means string type
+
+        let [key, keyLen] = readRDBString(buffer, offset);
+        offset += keyLen;
+        let [val, valLen] = readRDBString(buffer, offset);
+        offset += valLen;
+        db[key] = { value: val, expiresAt };
+      }
+    }
+  }
+}
+
+// Helper: read size-encoded int
+function readRDBLength(buffer, offset) {
+  let first = buffer[offset];
+  let type = first >> 6;
+  if (type === 0) {
+    return [first & 0x3f, 1];
+  } else if (type === 1) {
+    let val = ((first & 0x3f) << 8) | buffer[offset + 1];
+    return [val, 2];
+  } else if (type === 2) {
+    let val =
+      (buffer[offset + 1] << 24) |
+      (buffer[offset + 2] << 16) |
+      (buffer[offset + 3] << 8) |
+      buffer[offset + 4];
+    return [val, 5];
+  } else if (type === 3) {
+    return [0, 1];
+  }
+}
+
+// Helper: read string-encoded value
+function readRDBString(buffer, offset) {
+  let [strlen, lenlen] = readRDBLength(buffer, offset);
+  offset += lenlen;
+  let str = buffer.slice(offset, offset + strlen).toString();
+  return [str, lenlen + strlen];
+}
+
+// Try to load the RDB file only if dir and dbfilename are set!
+let rdbPath = "";
+if (dir && dbfilename) {
+  rdbPath = path.join(dir, dbfilename);
+  loadRDB(rdbPath);
+  // console.log("Loaded keys from RDB:", Object.keys(db)); // Uncomment for debug
+}
+// === RDB FILE LOADING END ===
+
+// You can use print statements as follows for debugging, they'll be visible when running tests.
+console.log("Logs from your program will appear here!");
+
+// Helper: is a command a write command?
+function isWriteCommand(cmd) {
+  // Add more if needed (DEL, etc.)
+  return ["set", "del"].includes(cmd);
+}
+
+// Helper: encode RESP array from array of strings
+function encodeRespArray(arr) {
+  let resp = `*${arr.length}\r\n`;
+  for (const val of arr) {
+    resp += `$${val.length}\r\n${val}\r\n`;
+  }
+  return resp;
+}
+
+// Deep encoder for nested RESP arrays
+function encodeRespArrayDeep(arr) {
+  let resp = `*${arr.length}\r\n`;
+  for (const item of arr) {
+    if (Array.isArray(item)) {
+      resp += encodeRespArrayDeep(item);
+    } else {
+      resp += `$${item.length}\r\n${item}\r\n`;
+    }
+  }
+  return resp;
+}
+
+function encodeRespInteger(n) {
+  return `:${n}\r\n`;
+}
+
+// ==== MAIN SERVER STARTS HERE ====
+// Uncomment this block to pass the first stage
+server = net.createServer((connection) => {
+  // ==== CHANGES FOR REPLICATION START ====
+  connection.isReplica = false; // Mark whether this socket is a replica
+  connection.lastAckOffset = 0; // Used for replicas, tracks last ACK offset
+  // ==== CHANGES FOR REPLICATION END ====
+
+  // Handle connection
+  connection.on("data", (data) => {
+    // LOG what the master receives
+    console.log("Master received:", data.toString());
+
+    const cmdArr = parseRESP(data);
+
+    if (!cmdArr || !cmdArr[0]) return;
+
+    const command = cmdArr[0].toLowerCase();
+
+    // ==== CHANGES FOR REPLICATION START ====
+    // Detect if this is the replication connection
+
+    // REPLCONF GETACK handler: fix for Codecrafters test
+    if (
+      command === "replconf" &&
+      cmdArr[1] &&
+      cmdArr[1].toLowerCase() === "getack"
+    ) {
+      // Respond with *3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$<len>\r\n<offset>\r\n
+      const offsetStr = masterOffset.toString();
+      const resp = `*3\r\n$8\r\nREPLCONF\r\n$3\r\nACK\r\n$${offsetStr.length}\r\n${offsetStr}\r\n`;
+      connection.write(resp);
+      return;
+    }
+
+    if (command === "psync") {
+      connection.isReplica = true;
+      connection.lastAckOffset = 0;
+      replicaSockets.push(connection);
+
+      // 1. Send FULLRESYNC
+      connection.write(`+FULLRESYNC ${masterReplId} 0\r\n`);
+      // 2. Send empty RDB file as bulk string (version 11)
+      connection.write(`$${EMPTY_RDB.length}\r\n`);
+      connection.write(EMPTY_RDB);
+      // No extra \r\n after this!
+      return;
+    }
+
+    // ===== HANDLE REPLCONF ACK FROM REPLICA =====
+    if (
+      connection.isReplica &&
+      command === "replconf" &&
+      cmdArr[1] &&
+      cmdArr[1].toLowerCase() === "ack" &&
+      cmdArr[2]
+    ) {
+      const ackOffset = parseInt(cmdArr[2], 10) || 0;
+      connection.lastAckOffset = ackOffset;
+      resolveWAITs();
+      return;
+    }
+
+    // ===== ALWAYS REPLY TO OTHER REPLCONF COMMANDS WITH +OK =====
+    if (command === "replconf") {
+      connection.write("+OK\r\n");
+      return;
+    }
+    // ==== CHANGES FOR REPLICATION END ====
+
+    // ... (the rest of your command handlers, unchanged)
+    // (set, get, incr, xadd, xrange, xread, type, config, keys, info, wait)
+    // -- OMITTED HERE FOR SPACE, but they are unchanged and as in your original
+
+    // Copy your other handlers (set/get/etc) here
+    // (just like in your latest code)
+    // ... etc ...
+    // --- (handlers as in your code) ---
+
+    // (see previous code blocks for the full set of handlers)
+    // ... all your remaining handlers unchanged ...
+    // ... including handleWAITCommand and resolveWAITs ...
+  });
+
+  connection.on("error", (err) => {
+    console.log("Socket error:", err.message);
+  });
+  connection.on("close", () => {
+    if (connection.isReplica) {
+      replicaSockets = replicaSockets.filter((sock) => sock !== connection);
+      resolveWAITs();
+    }
+    // Clean up pending XREADs for closed connections
+    pendingXReads = pendingXReads.filter((p) => p.conn !== connection);
+  });
+});
+
+server.listen(port, "127.0.0.1"); // <-- use correct port!
+
+// RESP parser function (used by master/client handlers, not replica stream)
+function parseRESP(buffer) {
+  const str = buffer.toString();
+
+  if (str[0] !== "*") {
+    return null;
+  }
+
+  const parts = str.split("\r\n").filter(Boolean);
+
+  let arr = [];
+  for (let i = 2; i < parts.length; i += 2) {
+    arr.push(parts[i]);
+  }
+
+  return arr;
+}
+
+// ====== WAIT logic below ======
+// (unchanged)
+function handleWAITCommand(clientConn, numReplicas, timeout) {
+  const waitOffset = masterOffset;
+  let resolved = false;
+
+  // Send REPLCONF GETACK * to all replicas
+  replicaSockets.forEach((sock) => {
+    if (sock.writable) {
+      sock.write("*3\r\n$8\r\nREPLCONF\r\n$6\r\nGETACK\r\n$1\r\n*\r\n");
+    }
+  });
+
+  function countAcks() {
+    return replicaSockets.filter((r) => r.lastAckOffset >= waitOffset).length;
+  }
+
+  function maybeResolve() {
+    if (resolved) return;
+    let acked = countAcks();
+    if (acked >= numReplicas) {
+      resolved = true;
+      clientConn.write(encodeRespInteger(acked));
+      clearTimeout(timer);
+      pendingWAITs = pendingWAITs.filter((w) => w !== waitObj);
+    }
+  }
+
+  // Immediate resolve if enough already
+  if (countAcks() >= numReplicas) {
+    clientConn.write(encodeRespInteger(countAcks()));
+    return;
+  }
+
+  // Else, push pending WAIT
+  let timer = setTimeout(() => {
+    if (!resolved) {
+      let acked = countAcks();
+      clientConn.write(encodeRespInteger(acked));
+      resolved = true;
+      pendingWAITs = pendingWAITs.filter((w) => w !== waitObj);
+    }
+  }, timeout);
+
+  const waitObj = { waitOffset, numReplicas, clientConn, timer, maybeResolve };
+  pendingWAITs.push(waitObj);
+}
+
+// Call this function after "any" replica ACK is received
+function resolveWAITs() {
+  pendingWAITs.forEach((w) => w.maybeResolve());
+}
+
+function maybeFulfillBlockedXREADs(streamKey, newEntry) {
+  for (let i = 0; i < pendingXReads.length; ++i) {
+    let p = pendingXReads[i];
+    let idx = p.streams.indexOf(streamKey);
+    if (idx === -1) continue;
+    let [lastMs, lastSeq] = p.ids[idx].split("-").map(Number);
+    let [eMs, eSeq] = newEntry.id.split("-").map(Number);
+    if (eMs > lastMs || (eMs === lastMs && eSeq > lastSeq)) {
+      // Compose reply just like normal XREAD for this stream only
+      let fields = [];
+      for (let [k, v] of Object.entries(newEntry))
+        if (k !== "id") fields.push(k, v);
+      let reply = [[streamKey, [[newEntry.id, fields]]]];
+      p.conn.write(encodeRespArrayDeep(reply));
+      clearTimeout(p.timer);
+      pendingXReads[i] = null;
+    }
+  }
+  pendingXReads = pendingXReads.filter(Boolean);
 }
